@@ -37,4 +37,7 @@ USER 65532:65532
 
 EXPOSE 8080
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD ["/app/secretmediabot", "healthcheck"]
+
 ENTRYPOINT ["/app/secretmediabot"]

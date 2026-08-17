@@ -29,6 +29,12 @@ var (
 )
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "healthcheck" {
+		if err := healthcheck(); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -36,6 +42,19 @@ func main() {
 		slog.Error("bot stopped", "err", err)
 		os.Exit(1)
 	}
+}
+
+func healthcheck() error {
+	client := http.Client{Timeout: 4 * time.Second}
+	response, err := client.Get("http://127.0.0.1:8080/readyz")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("readiness endpoint returned HTTP %d", response.StatusCode)
+	}
+	return nil
 }
 
 func run(parent context.Context) error {
