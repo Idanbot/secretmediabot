@@ -84,7 +84,7 @@ jobs:
           if-no-files-found: error
 
       - name: Scan published image
-        uses: aquasecurity/trivy-action@0.36.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.IMAGE_NAME }}:commit-${{ github.sha }}
           scanners: vuln,misconfig
