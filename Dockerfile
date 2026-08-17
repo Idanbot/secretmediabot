@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1.12
 
-FROM golang:1.26.6-alpine3.24 AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.6-alpine3.24 AS build
 
 WORKDIR /src
 
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates=20260611-r0
 
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
@@ -33,7 +33,7 @@ WORKDIR /app
 
 COPY --from=build /out/secretmediabot /app/secretmediabot
 
-USER nonroot:nonroot
+USER 65532:65532
 
 EXPOSE 8080
 

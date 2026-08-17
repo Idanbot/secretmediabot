@@ -405,10 +405,10 @@ func validateHTTPURL(name, raw string, allowHTTP bool) error {
 	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return fmt.Errorf("config %s: must be an absolute URL without credentials, query, or fragment", name)
 	}
-	if u.Scheme != "https" && !(allowHTTP && u.Scheme == "http") {
-		return fmt.Errorf("config %s: must use HTTPS", name)
+	if u.Scheme == "https" || (allowHTTP && u.Scheme == "http") {
+		return nil
 	}
-	return nil
+	return fmt.Errorf("config %s: must use HTTPS", name)
 }
 
 func validateDatabaseURL(raw string) error {

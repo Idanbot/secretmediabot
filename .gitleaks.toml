@@ -1,0 +1,6 @@
+title = "Secret Media Bot Gitleaks Configuration"
+
+[allowlist]
+description = "Documented non-secret webhook placeholder from the initial public documentation"
+paths = ['''^README\.md$''']
+regexes = ['''replace_with_64_hex_characters''']

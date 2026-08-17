@@ -183,7 +183,7 @@ Configure an exact public endpoint and a 32–256 character secret containing on
 ```dotenv
 TELEGRAM_UPDATE_MODE=webhook
 TELEGRAM_WEBHOOK_PUBLIC_URL=https://bot.example.com/telegram/webhook
-TELEGRAM_WEBHOOK_SECRET=replace_with_64_hex_characters
+TELEGRAM_WEBHOOK_SECRET=configure-this-locally
 TELEGRAM_WEBHOOK_MAX_CONNECTIONS=4
 HTTP_WRITE_TIMEOUT=3m
 ```
@@ -225,6 +225,25 @@ TEST_DATABASE_URL='postgres://user:password@127.0.0.1:5432/database?sslmode=disa
 ```
 
 The PostgreSQL suite applies the embedded migrations to the supplied test database and truncates application tables; use a disposable database. It exercises same-chat lookup, concurrent draft creation, encrypted finalization and rollback, concurrent one-time opening, durable deletion jobs, audit action selection, the 20 MiB database constraint, and retention cascades. There is no automated or manually claimed live-Telegram end-to-end result.
+
+## CI/CD and container images
+
+GitHub Actions runs Go formatting, vet, race tests, golangci-lint, govulncheck, Gitleaks, Hadolint, and Trivy on every push and on pull requests targeting `main`. The container workflow builds `linux/amd64` and `linux/arm64` images with Buildx, registry-backed cache, SBOM, and provenance, then publishes them to `ghcr.io/idanbot/secretmediabot`.
+
+The `main` branch receives the mutable `latest` tag. Every push also receives immutable `commit-<full-sha>` and `commit-<short-sha>` tags. Each container workflow uploads a `compose-image.env` artifact containing the pushed manifest digest. To deploy that exact image with Compose:
+
+```sh
+export BOT_IMAGE_REF='ghcr.io/idanbot/secretmediabot@sha256:replace_with_the_ci_digest'
+docker compose up -d --no-build
+```
+
+Local development remains unchanged:
+
+```sh
+docker compose up -d --build
+```
+
+`Dockerfile` uses a Go builder stage with BuildKit module/build caches and a minimal distroless runtime stage running as UID/GID `65532:65532`.
 
 ## Package layout
 

@@ -71,8 +71,9 @@ func ParseCallbackData(data string) (string, error) {
 	}
 	for i := 0; i < len(raw); i++ {
 		char := raw[i]
-		if !((char >= 'A' && char <= 'Z') || (char >= 'a' && char <= 'z') ||
-			(char >= '0' && char <= '9') || char == '-' || char == '_') {
+		isLetter := (char >= 'A' && char <= 'Z') || (char >= 'a' && char <= 'z')
+		isDigit := char >= '0' && char <= '9'
+		if !isLetter && !isDigit && char != '-' && char != '_' {
 			return "", ErrInvalidTokenEncoding
 		}
 	}

@@ -58,7 +58,7 @@ func run(parent context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer database.Close()
+	defer func() { _ = database.Close() }()
 
 	migrateCtx, cancelMigrate := context.WithTimeout(parent, 2*time.Minute)
 	err = database.Migrate(migrateCtx)

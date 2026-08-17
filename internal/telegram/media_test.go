@@ -197,7 +197,7 @@ func TestSendPrivateMediaMultipart(t *testing.T) {
 			t.Errorf("FormFile: %v", err)
 			return
 		}
-		defer file.Close()
+		defer func() { _ = file.Close() }()
 		data, err := io.ReadAll(file)
 		if err != nil {
 			t.Errorf("read multipart file: %v", err)

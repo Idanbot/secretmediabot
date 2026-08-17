@@ -47,7 +47,7 @@ func (h *Handler) Publish(ctx context.Context, publication service.Publication) 
 		return errors.Join(err, finishErr)
 	}
 	if message.MessageID <= 0 {
-		err = errors.New("Telegram envelope response has no message ID")
+		err = errors.New("telegram envelope response has no message ID")
 		finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		defer cancel()
 		finishErr := h.service.FailPublication(

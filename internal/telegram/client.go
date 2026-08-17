@@ -331,7 +331,7 @@ func (c *Client) DownloadFile(ctx context.Context, filePath string) ([]byte, err
 	if err != nil {
 		return nil, &RequestError{Method: "downloadFile", cause: c.safeCause(ctx, err)}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return nil, &APIError{
@@ -420,7 +420,7 @@ func (c *Client) call(ctx context.Context, method, contentType string, body io.R
 	if err != nil {
 		return &RequestError{Method: method, cause: c.safeCause(ctx, err)}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.ContentLength > maxAPIResponseBytes {
 		return &ProtocolError{Method: method, Reason: "response exceeds safety limit"}

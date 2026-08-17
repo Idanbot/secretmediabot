@@ -17,7 +17,6 @@ import (
 type fakeGuestUseCases struct {
 	create      func(context.Context, service.CreateGuestRequestParams) (service.GuestSession, error)
 	mark        func(context.Context, string, string) error
-	cancel      func(context.Context, int64) error
 	begin       func(context.Context, string, domain.User) (service.GuestSession, error)
 	reserve     func(context.Context, string, domain.User) (service.GuestDelivery, error)
 	complete    func(context.Context, service.GuestDelivery, int64) error
