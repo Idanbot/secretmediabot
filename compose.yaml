@@ -1,0 +1,52 @@
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-unknown}
+    restart: unless-stopped
+    init: true
+    env_file:
+      - ${ENV_FILE:-.env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${HTTP_BIND_HOST:-127.0.0.1}:${HTTP_PORT:-8080}:8080"
+    networks:
+      - whisper
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    stop_grace_period: 20s
+
+  postgres:
+    image: postgres:18.6-alpine3.24
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_INITDB_ARGS: --data-checksums
+    volumes:
+      # PostgreSQL 18+ uses a version-aware data directory below this mount.
+      - postgres_data:/var/lib/postgresql
+    networks:
+      - whisper
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 30s
+
+volumes:
+  postgres_data:
+
+networks:
+  whisper:

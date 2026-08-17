@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+
+/bin/
+/dist/
+/coverage.out
+*.test
+*.prof
+
+.idea/
+.vscode/
+.DS_Store
+
+*.swp
+*.swo
+*~
