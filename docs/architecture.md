@@ -318,6 +318,8 @@ The default Compose stack contains only the bot and PostgreSQL. PostgreSQL is in
 
 `cmd/bot` validates configuration, opens PostgreSQL, applies embedded migrations, initializes the keyring, verifies `getMe`, configures polling or webhook mode, then starts the HTTP server and cleanup, publication, and ephemeral-deletion workers. Polling adds a fifth runner. A signal or unexpected runner exit cancels the shared context; HTTP receives a bounded graceful shutdown and the executable waits for all workers.
 
+The container image declares a `HEALTHCHECK` that runs the `healthcheck` subcommand, which issues a short-timeout `GET /readyz` against `127.0.0.1:8080` and exits non-zero unless the readiness endpoint returns `200 OK`. The subcommand is independent of configuration loading and exits before the main process starts.
+
 Before calling the service production-ready, at minimum validate or add:
 
 - live Telegram group/supergroup tests for Bot API 10.2+ ephemeral fields, offline recipients, topics, media types, simultaneous button presses, and deletion behavior;
