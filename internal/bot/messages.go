@@ -142,7 +142,7 @@ func (h *Handler) handleCancel(ctx context.Context, message telegram.Message, se
 	cancelledGuest := 0
 	if h.guest != nil {
 		count, guestCancelErr := h.guest.CancelGuestRequest(ctx, sender.TelegramUserID)
-		if guestCancelErr != nil && !errors.Is(guestCancelErr, service.ErrGuestNotFound) {
+		if guestCancelErr != nil && !errors.Is(guestCancelErr, service.ErrGuestNotFound) && !errors.Is(guestCancelErr, service.ErrGuestUnavailable) {
 			if text, expected := userMessage(guestCancelErr); expected {
 				return h.sendReply(ctx, message, text, nil)
 			}
@@ -255,7 +255,7 @@ func (h *Handler) ingestGuestSecret(ctx context.Context, message telegram.Messag
 		return false, nil
 	}
 	claim, err := h.guest.ClaimGuestIngestForSender(ctx, sender.TelegramUserID)
-	if errors.Is(err, service.ErrGuestNotFound) {
+	if errors.Is(err, service.ErrGuestNotFound) || errors.Is(err, service.ErrGuestUnavailable) {
 		return false, nil
 	}
 	if err != nil {
