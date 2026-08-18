@@ -29,13 +29,24 @@ type CleanupStore interface {
 	RunCleanup(context.Context, repository.CleanupParams) (repository.CleanupResult, error)
 }
 
+type ExpiryNotifier interface {
+	NotifyExpiredDraft(ctx context.Context, senderID int64) error
+	NotifyExpiredGuestRequest(ctx context.Context, senderID int64) error
+}
+
+type CleanupWorkerOptions struct {
+	Interval                  time.Duration
+	BatchSize                 int
+	ProcessedUpdateRetention  time.Duration
+	ObservedIdentityRetention time.Duration
+	Notifier                  ExpiryNotifier
+}
+
 type CleanupWorker struct {
-	store                    CleanupStore
-	interval                 time.Duration
-	batchSize                int
-	processedUpdateRetention time.Duration
-	logger                   *slog.Logger
-	now                      func() time.Time
+	store   CleanupStore
+	options CleanupWorkerOptions
+	logger  *slog.Logger
+	now     func() time.Time
 }
 
 func NewCleanupWorker(
@@ -45,16 +56,29 @@ func NewCleanupWorker(
 	processedUpdateRetention time.Duration,
 	logger *slog.Logger,
 ) (*CleanupWorker, error) {
-	if store == nil || interval <= 0 || batchSize <= 0 || processedUpdateRetention <= 0 {
-		return nil, errors.New("cleanup worker requires a store and positive interval, batch size, and retention")
+	return NewCleanupWorkerWithOptions(store, CleanupWorkerOptions{
+		Interval:                 interval,
+		BatchSize:                batchSize,
+		ProcessedUpdateRetention: processedUpdateRetention,
+	}, logger)
+}
+
+func NewCleanupWorkerWithOptions(
+	store CleanupStore,
+	options CleanupWorkerOptions,
+	logger *slog.Logger,
+) (*CleanupWorker, error) {
+	if store == nil || options.Interval <= 0 || options.BatchSize <= 0 || options.ProcessedUpdateRetention <= 0 || options.ObservedIdentityRetention < 0 {
+		return nil, errors.New("cleanup worker requires a store and positive interval, batch size, and update retention")
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &CleanupWorker{
-		store: store, interval: interval, batchSize: batchSize,
-		processedUpdateRetention: processedUpdateRetention, logger: logger,
-		now: func() time.Time { return time.Now().UTC() },
+		store:   store,
+		options: options,
+		logger:  logger,
+		now:     func() time.Time { return time.Now().UTC() },
 	}, nil
 }
 
@@ -62,7 +86,7 @@ func (w *CleanupWorker) Run(ctx context.Context) error {
 	if err := w.runOnce(ctx); err != nil && ctx.Err() == nil {
 		w.logger.ErrorContext(ctx, "initial cleanup failed")
 	}
-	ticker := time.NewTicker(w.interval)
+	ticker := time.NewTicker(w.options.Interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -79,10 +103,25 @@ func (w *CleanupWorker) Run(ctx context.Context) error {
 func (w *CleanupWorker) runOnce(ctx context.Context) error {
 	now := w.now()
 	result, err := w.store.RunCleanup(ctx, repository.CleanupParams{
-		Now: now, ProcessedUpdatesBefore: now.Add(-w.processedUpdateRetention), BatchSize: w.batchSize,
+		Now:                    now,
+		ProcessedUpdatesBefore: now.Add(-w.options.ProcessedUpdateRetention),
+		BatchSize:              w.options.BatchSize,
+		IdentityRetention:      w.options.ObservedIdentityRetention,
 	})
 	if err != nil {
 		return err
+	}
+	if w.options.Notifier != nil {
+		for _, senderID := range result.ExpiredDraftSenderIDs {
+			if notifyErr := w.options.Notifier.NotifyExpiredDraft(ctx, senderID); notifyErr != nil {
+				w.logger.WarnContext(ctx, "failed to notify sender of expired draft", "sender_id", senderID)
+			}
+		}
+		for _, senderID := range result.ExpiredGuestSenderIDs {
+			if notifyErr := w.options.Notifier.NotifyExpiredGuestRequest(ctx, senderID); notifyErr != nil {
+				w.logger.WarnContext(ctx, "failed to notify sender of expired guest request", "sender_id", senderID)
+			}
+		}
 	}
 	if total := cleanupTotal(result); total > 0 {
 		w.logger.InfoContext(ctx, "cleanup completed", "affected_rows", total)
@@ -93,7 +132,9 @@ func (w *CleanupWorker) runOnce(ctx context.Context) error {
 func cleanupTotal(result repository.CleanupResult) int64 {
 	return result.ExpiredDrafts + result.ReleasedDraftIngests + result.ExpiredWhispers +
 		result.ReleasedOpenLeases + result.ReleasedPublishLeases + result.DeletedWhispers +
-		result.DeletedProcessedUpdates + result.DeletedEphemeralJobs + result.DeletedGuestRequests + result.DeletedGuestJobs
+		result.DeletedProcessedUpdates + result.DeletedEphemeralJobs + result.DeletedGuestRequests +
+		result.DeletedGuestJobs + result.DeletedDrafts + result.DeletedMembers +
+		result.DeletedUsers + result.DeletedChats
 }
 
 type EphemeralDeleteStore interface {

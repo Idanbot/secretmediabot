@@ -90,3 +90,57 @@ func TestNewKeyringValidatesKeys(t *testing.T) {
 		t.Fatalf("NewKeyring() error = %v, want ErrInvalidKey", err)
 	}
 }
+
+func TestKeyringMultiKeyRotationRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	oldKey := bytes.Repeat([]byte{0x11}, KeySize)
+	newKey := bytes.Repeat([]byte{0x22}, KeySize)
+
+	oldRing, err := NewKeyring("v1", map[string][]byte{"v1": oldKey})
+	if err != nil {
+		t.Fatalf("NewKeyring(v1) error = %v", err)
+	}
+
+	plaintext := []byte("secret payload from yesterday")
+	aad := []byte("blob:019123")
+	encryptedOld, err := oldRing.Encrypt(plaintext, aad)
+	if err != nil {
+		t.Fatalf("oldRing.Encrypt() error = %v", err)
+	}
+
+	// Rotated keyring has v2 active, with v1 preserved for previous decryption
+	rotatedRing, err := NewKeyring("v2", map[string][]byte{
+		"v2": newKey,
+		"v1": oldKey,
+	})
+	if err != nil {
+		t.Fatalf("NewKeyring(v2) error = %v", err)
+	}
+
+	// Decrypt old ciphertext using the rotated keyring
+	decryptedOld, err := rotatedRing.Decrypt(encryptedOld.KeyID, encryptedOld.Nonce, encryptedOld.Ciphertext, aad)
+	if err != nil {
+		t.Fatalf("rotatedRing.Decrypt(v1) error = %v", err)
+	}
+	if !bytes.Equal(decryptedOld, plaintext) {
+		t.Fatalf("decrypted = %q, want %q", decryptedOld, plaintext)
+	}
+
+	// Encrypt new ciphertext using the rotated keyring (should use v2)
+	newPlaintext := []byte("secret payload from today")
+	encryptedNew, err := rotatedRing.Encrypt(newPlaintext, aad)
+	if err != nil {
+		t.Fatalf("rotatedRing.Encrypt() error = %v", err)
+	}
+	if encryptedNew.KeyID != "v2" {
+		t.Fatalf("encryptedNew.KeyID = %q, want v2", encryptedNew.KeyID)
+	}
+	decryptedNew, err := rotatedRing.Decrypt(encryptedNew.KeyID, encryptedNew.Nonce, encryptedNew.Ciphertext, aad)
+	if err != nil {
+		t.Fatalf("rotatedRing.Decrypt(v2) error = %v", err)
+	}
+	if !bytes.Equal(decryptedNew, newPlaintext) {
+		t.Fatalf("decrypted = %q, want %q", decryptedNew, newPlaintext)
+	}
+}

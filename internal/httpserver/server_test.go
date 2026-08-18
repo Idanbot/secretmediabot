@@ -46,6 +46,21 @@ func TestHealthAndReadiness(t *testing.T) {
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("not-ready status = %d", response.Code)
 	}
+
+	health := httptest.NewRecorder()
+	ready.Handler().ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if health.Code != http.StatusOK {
+		t.Fatalf("health status = %d", health.Code)
+	}
+
+	metricsResp := httptest.NewRecorder()
+	ready.Handler().ServeHTTP(metricsResp, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if metricsResp.Code != http.StatusOK {
+		t.Fatalf("metrics status = %d", metricsResp.Code)
+	}
+	if contentType := metricsResp.Header().Get("Content-Type"); !strings.Contains(contentType, "text/plain") {
+		t.Fatalf("metrics content type = %q, want text/plain", contentType)
+	}
 }
 
 func TestWebhookAuthenticationAndDispatch(t *testing.T) {

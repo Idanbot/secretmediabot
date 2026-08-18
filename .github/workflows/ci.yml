@@ -9,9 +9,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
-  id-token: write
-  security-events: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -24,6 +21,8 @@ jobs:
   quality:
     name: Go checks
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Check out source
         uses: actions/checkout@v7
@@ -33,6 +32,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Verify modules
+        shell: bash
+        run: |
+          go mod verify
+          git diff --exit-code go.mod go.sum
 
       - name: Check formatting
         shell: bash
@@ -57,6 +62,8 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Check out source
         uses: actions/checkout@v7
@@ -73,9 +80,46 @@ jobs:
           version: v2.12.2
           args: ./...
 
+  integration:
+    name: PostgreSQL integration tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:18.6-alpine3.24
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: testdb
+          POSTGRES_INITDB_ARGS: --data-checksums
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test -d testdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run PostgreSQL integration tests
+        env:
+          TEST_DATABASE_URL: postgres://test:testpassword@127.0.0.1:5432/testdb?sslmode=disable
+        run: go test -v -race ./internal/repository/...
+
   dockerfile:
     name: Dockerfile lint
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Check out source
         uses: actions/checkout@v7
@@ -88,6 +132,9 @@ jobs:
   secrets:
     name: Secret scan
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - name: Check out full history
         uses: actions/checkout@v7
@@ -102,6 +149,9 @@ jobs:
   filesystem-security:
     name: Filesystem security scan
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - name: Check out source
         uses: actions/checkout@v7
@@ -125,9 +175,14 @@ jobs:
           sarif_file: trivy-fs.sarif
 
   image:
-    name: Build and publish image
-    needs: [quality, lint, dockerfile, secrets, filesystem-security]
+    name: Build, scan, and publish image
+    needs: [quality, lint, integration, dockerfile, secrets, filesystem-security]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      security-events: write
     steps:
       - name: Check out source
         uses: actions/checkout@v7
@@ -137,6 +192,35 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
+
+      - name: Build container image locally for scanning
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          load: true
+          tags: ${{ env.IMAGE_NAME }}:scan
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+
+      - name: Scan container image before publishing
+        id: scan-image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:scan
+          scanners: vuln,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: sarif
+          output: trivy-image.sarif
+          exit-code: 1
+
+      - name: Upload image scan results
+        if: always() && steps.scan-image.outcome != 'skipped'
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-image.sarif
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
@@ -166,12 +250,13 @@ jobs:
 
       - name: Build and push multi-architecture image
         id: build
+        if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
@@ -196,22 +281,3 @@ jobs:
           name: compose-image-${{ github.sha }}
           path: compose-image.env
           if-no-files-found: error
-
-      - name: Scan published image
-        id: scan-image
-        if: github.event_name != 'pull_request'
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: ${{ env.IMAGE_NAME }}:commit-${{ github.sha }}
-          scanners: vuln,misconfig
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          format: sarif
-          output: trivy-image.sarif
-          exit-code: 1
-
-      - name: Upload image scan results
-        if: always() && steps.scan-image.outcome != 'skipped'
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: trivy-image.sarif

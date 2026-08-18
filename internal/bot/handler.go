@@ -176,3 +176,29 @@ func optionalMessageID(value int64) *int64 {
 	copy := value
 	return &copy
 }
+
+func (h *Handler) NotifyExpiredDraft(ctx context.Context, senderID int64) error {
+	if senderID <= 0 {
+		return nil
+	}
+	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), h.requestTimeout)
+	defer cancel()
+	_, err := h.telegram.SendMessage(sendCtx, telegram.SendMessageRequest{
+		ChatID: senderID,
+		Text:   "Your whisper draft has expired because no secret was sent within the time limit.",
+	})
+	return err
+}
+
+func (h *Handler) NotifyExpiredGuestRequest(ctx context.Context, senderID int64) error {
+	if senderID <= 0 {
+		return nil
+	}
+	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), h.requestTimeout)
+	defer cancel()
+	_, err := h.telegram.SendMessage(sendCtx, telegram.SendMessageRequest{
+		ChatID: senderID,
+		Text:   "Your locked secret request has expired because no secret was provided in time.",
+	})
+	return err
+}

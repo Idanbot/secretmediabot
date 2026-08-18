@@ -126,3 +126,88 @@ func TestEphemeralDeleteWorkerFailureLogIsRedacted(t *testing.T) {
 		t.Fatalf("ephemeral deletion log leaked store error: %q", output)
 	}
 }
+
+type fakeExpiryNotifier struct {
+	expiredDrafts []int64
+	expiredGuests []int64
+}
+
+func (f *fakeExpiryNotifier) NotifyExpiredDraft(_ context.Context, senderID int64) error {
+	f.expiredDrafts = append(f.expiredDrafts, senderID)
+	return nil
+}
+
+func (f *fakeExpiryNotifier) NotifyExpiredGuestRequest(_ context.Context, senderID int64) error {
+	f.expiredGuests = append(f.expiredGuests, senderID)
+	return nil
+}
+
+func TestCleanupWorkerNotifiesExpiredSenders(t *testing.T) {
+	t.Parallel()
+
+	var receivedParams repository.CleanupParams
+	store := cleanupStoreFunc(func(_ context.Context, params repository.CleanupParams) (repository.CleanupResult, error) {
+		receivedParams = params
+		return repository.CleanupResult{
+			ExpiredDrafts:         2,
+			ExpiredDraftSenderIDs: []int64{101, 102},
+			ExpiredGuestSenderIDs: []int64{201},
+		}, nil
+	})
+
+	notifier := &fakeExpiryNotifier{}
+	worker, err := NewCleanupWorkerWithOptions(store, CleanupWorkerOptions{
+		Interval:                  time.Hour,
+		BatchSize:                 250,
+		ProcessedUpdateRetention:  24 * time.Hour,
+		ObservedIdentityRetention: 30 * 24 * time.Hour,
+		Notifier:                  notifier,
+	}, slog.Default())
+	if err != nil {
+		t.Fatalf("NewCleanupWorkerWithOptions() error = %v", err)
+	}
+
+	if err := worker.runOnce(context.Background()); err != nil {
+		t.Fatalf("runOnce() error = %v", err)
+	}
+
+	if receivedParams.BatchSize != 250 {
+		t.Fatalf("BatchSize = %d, want 250", receivedParams.BatchSize)
+	}
+	if receivedParams.IdentityRetention != 30*24*time.Hour {
+		t.Fatalf("IdentityRetention = %s, want 720h", receivedParams.IdentityRetention)
+	}
+	if len(notifier.expiredDrafts) != 2 || notifier.expiredDrafts[0] != 101 || notifier.expiredDrafts[1] != 102 {
+		t.Fatalf("expiredDrafts = %v, want [101 102]", notifier.expiredDrafts)
+	}
+	if len(notifier.expiredGuests) != 1 || notifier.expiredGuests[0] != 201 {
+		t.Fatalf("expiredGuests = %v, want [201]", notifier.expiredGuests)
+	}
+}
+
+func TestCleanupWorkerOptionsValidation(t *testing.T) {
+	t.Parallel()
+
+	store := cleanupStoreFunc(func(context.Context, repository.CleanupParams) (repository.CleanupResult, error) {
+		return repository.CleanupResult{}, nil
+	})
+
+	_, err := NewCleanupWorkerWithOptions(store, CleanupWorkerOptions{
+		Interval:                 0,
+		BatchSize:                100,
+		ProcessedUpdateRetention: time.Hour,
+	}, nil)
+	if err == nil {
+		t.Fatal("expected error for non-positive interval")
+	}
+
+	_, err = NewCleanupWorkerWithOptions(store, CleanupWorkerOptions{
+		Interval:                  time.Hour,
+		BatchSize:                 100,
+		ProcessedUpdateRetention:  time.Hour,
+		ObservedIdentityRetention: -time.Hour,
+	}, nil)
+	if err == nil {
+		t.Fatal("expected error for negative identity retention")
+	}
+}

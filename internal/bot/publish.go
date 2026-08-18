@@ -44,6 +44,9 @@ func (h *Handler) Publish(ctx context.Context, publication service.Publication) 
 		finishErr := h.service.FailPublication(
 			finishCtx, publication, publicationErrorCode(err), retryAfter,
 		)
+		if telegram.IsPermanent(err) {
+			h.notifySenderPublicationFailed(ctx, publication)
+		}
 		return errors.Join(err, finishErr)
 	}
 	if message.MessageID <= 0 {
@@ -56,6 +59,30 @@ func (h *Handler) Publish(ctx context.Context, publication service.Publication) 
 		return errors.Join(err, finishErr)
 	}
 	return h.completePublication(ctx, publication, message.MessageID)
+}
+
+func (h *Handler) notifySenderPublicationFailed(ctx context.Context, publication service.Publication) {
+	senderID := publication.Whisper.SenderID
+	if senderID == 0 {
+		senderID = publication.Sender.TelegramUserID
+	}
+	if senderID == 0 {
+		return
+	}
+	recipientName := publication.Recipient.DisplayName()
+	if recipientName == "" {
+		recipientName = "the recipient"
+	}
+	text := fmt.Sprintf(
+		"I couldn't post the secret envelope for %s in the group (the group may have removed the bot or restricted posting permissions). The secret will not be delivered.",
+		recipientName,
+	)
+	notifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), h.requestTimeout)
+	defer cancel()
+	_, _ = h.telegram.SendMessage(notifyCtx, telegram.SendMessageRequest{
+		ChatID: senderID,
+		Text:   text,
+	})
 }
 
 func (h *Handler) completePublication(ctx context.Context, publication service.Publication, messageID int64) error {
@@ -80,14 +107,10 @@ func publicationRetryDelay(err error, attempt int) time.Duration {
 		if retry := apiErr.RetryAfter(); retry > 0 {
 			return retry
 		}
-		code := apiErr.ErrorCode
-		if code == 0 {
-			code = apiErr.StatusCode
-		}
-		if code == 429 {
+		if apiErr.RateLimited() {
 			return 30 * time.Second
 		}
-		if code >= 400 && code < 500 {
+		if apiErr.Permanent() {
 			return 0
 		}
 	}
@@ -101,14 +124,10 @@ func publicationRetryDelay(err error, attempt int) time.Duration {
 func publicationErrorCode(err error) string {
 	var apiErr *telegram.APIError
 	if errors.As(err, &apiErr) {
-		code := apiErr.ErrorCode
-		if code == 0 {
-			code = apiErr.StatusCode
-		}
-		if code == 429 {
+		if apiErr.RateLimited() {
 			return "telegram_rate_limited"
 		}
-		if code >= 400 && code < 500 {
+		if apiErr.Permanent() {
 			return "telegram_rejected_envelope"
 		}
 		return "telegram_api_unavailable"

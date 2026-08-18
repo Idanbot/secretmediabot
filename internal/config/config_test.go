@@ -51,6 +51,9 @@ func TestLoadFromLookupUsesSecureDefaultsAndNormalizesLists(t *testing.T) {
 	if cfg.Media.StorageMode != "postgres" {
 		t.Fatalf("Media.StorageMode = %q, want postgres", cfg.Media.StorageMode)
 	}
+	if cfg.Cleanup.ObservedIdentityRetention != 90*24*time.Hour {
+		t.Fatalf("Cleanup.ObservedIdentityRetention = %s, want 2160h", cfg.Cleanup.ObservedIdentityRetention)
+	}
 	if len(cfg.Media.EncryptionKey) != 32 {
 		t.Fatalf("EncryptionKey length = %d, want 32", len(cfg.Media.EncryptionKey))
 	}
@@ -375,5 +378,45 @@ func TestWarningsSurfaceOperationalRisks(t *testing.T) {
 	}
 	if !strings.Contains(joined, "ALLOW_ALL_CHATS") {
 		t.Errorf("warnings missing allow-all note: %v", cfg.Warnings)
+	}
+}
+
+func TestMediaEncryptionPreviousKeys(t *testing.T) {
+	t.Parallel()
+
+	prevKey := make([]byte, 32)
+	for i := range prevKey {
+		prevKey[i] = byte(i*13 + 7)
+	}
+	prevKeyB64 := base64.StdEncoding.EncodeToString(prevKey)
+
+	env := validEnvironment()
+	env["MEDIA_ENCRYPTION_KEY_ID"] = "v2"
+	env["MEDIA_ENCRYPTION_PREVIOUS_KEYS"] = "v1:" + prevKeyB64
+
+	cfg, err := LoadFromLookup(mapLookup(env))
+	if err != nil {
+		t.Fatalf("LoadFromLookup() with previous keys error = %v", err)
+	}
+	if len(cfg.Media.PreviousKeys) != 1 {
+		t.Fatalf("PreviousKeys count = %d, want 1", len(cfg.Media.PreviousKeys))
+	}
+	if got := cfg.Media.PreviousKeys["v1"]; len(got) != 32 {
+		t.Fatalf("Previous key v1 length = %d, want 32", len(got))
+	}
+
+	// Reject previous key using active key ID
+	invalidEnv := validEnvironment()
+	invalidEnv["MEDIA_ENCRYPTION_KEY_ID"] = "v1"
+	invalidEnv["MEDIA_ENCRYPTION_PREVIOUS_KEYS"] = "v1:" + prevKeyB64
+	if _, err := LoadFromLookup(mapLookup(invalidEnv)); err == nil || !strings.Contains(err.Error(), "active key ID") {
+		t.Fatalf("expected error for duplicate active key ID in previous keys, got %v", err)
+	}
+
+	// Reject invalid format
+	badFormatEnv := validEnvironment()
+	badFormatEnv["MEDIA_ENCRYPTION_PREVIOUS_KEYS"] = "v1"
+	if _, err := LoadFromLookup(mapLookup(badFormatEnv)); err == nil {
+		t.Fatal("expected error for invalid previous key format")
 	}
 }

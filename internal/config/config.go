@@ -105,12 +105,14 @@ type MediaConfig struct {
 	DownloadTimeout time.Duration
 	EncryptionKeyID string
 	EncryptionKey   SecretBytes
+	PreviousKeys    map[string]SecretBytes
 }
 
 type CleanupConfig struct {
-	Interval                 time.Duration
-	BatchSize                int
-	ProcessedUpdateRetention time.Duration
+	Interval                  time.Duration
+	BatchSize                 int
+	ProcessedUpdateRetention  time.Duration
+	ObservedIdentityRetention time.Duration
 }
 
 // Default returns non-secret defaults. Required credentials and identifiers are
@@ -165,9 +167,10 @@ func Default() Config {
 			EncryptionKeyID: "v1",
 		},
 		Cleanup: CleanupConfig{
-			Interval:                 5 * time.Minute,
-			BatchSize:                500,
-			ProcessedUpdateRetention: 7 * 24 * time.Hour,
+			Interval:                  5 * time.Minute,
+			BatchSize:                 500,
+			ProcessedUpdateRetention:  7 * 24 * time.Hour,
+			ObservedIdentityRetention: 90 * 24 * time.Hour,
 		},
 	}
 }
@@ -256,10 +259,12 @@ func LoadFromLookup(lookup func(string) (string, bool)) (Config, error) {
 	l.duration("MEDIA_DOWNLOAD_TIMEOUT", &cfg.Media.DownloadTimeout)
 	l.text("MEDIA_ENCRYPTION_KEY_ID", &cfg.Media.EncryptionKeyID)
 	l.base64Secret("MEDIA_ENCRYPTION_KEY", &cfg.Media.EncryptionKey)
+	l.base64SecretMap("MEDIA_ENCRYPTION_PREVIOUS_KEYS", &cfg.Media.PreviousKeys)
 
 	l.duration("CLEANUP_INTERVAL", &cfg.Cleanup.Interval)
 	l.integer("CLEANUP_BATCH_SIZE", &cfg.Cleanup.BatchSize)
 	l.duration("PROCESSED_UPDATE_RETENTION", &cfg.Cleanup.ProcessedUpdateRetention)
+	l.duration("OBSERVED_IDENTITY_RETENTION", &cfg.Cleanup.ObservedIdentityRetention)
 
 	if l.err != nil {
 		return Config{}, l.err
@@ -427,9 +432,23 @@ func (c Config) Validate() error {
 	if isLowEntropyBytes(c.Media.EncryptionKey) {
 		return errors.New("config MEDIA_ENCRYPTION_KEY: key material looks non-random (all-zero or repeated bytes)")
 	}
+	for id, prevKey := range c.Media.PreviousKeys {
+		if id == "" {
+			return errors.New("config MEDIA_ENCRYPTION_PREVIOUS_KEYS: key ID cannot be empty")
+		}
+		if id == c.Media.EncryptionKeyID {
+			return errors.New("config MEDIA_ENCRYPTION_PREVIOUS_KEYS: contains the active key ID")
+		}
+		if len(prevKey) != 32 {
+			return fmt.Errorf("config MEDIA_ENCRYPTION_PREVIOUS_KEYS: key %q must decode to exactly 32 bytes", id)
+		}
+		if isLowEntropyBytes(prevKey) {
+			return fmt.Errorf("config MEDIA_ENCRYPTION_PREVIOUS_KEYS: key %q material looks non-random", id)
+		}
+	}
 
-	if c.Cleanup.Interval <= 0 || c.Cleanup.BatchSize <= 0 || c.Cleanup.ProcessedUpdateRetention <= 0 {
-		return errors.New("config cleanup: interval, batch size, and processed-update retention must be positive")
+	if c.Cleanup.Interval <= 0 || c.Cleanup.BatchSize <= 0 || c.Cleanup.ProcessedUpdateRetention <= 0 || c.Cleanup.ObservedIdentityRetention < 0 {
+		return errors.New("config cleanup: interval, batch size, and processed-update retention must be positive, and observed-identity retention must be non-negative")
 	}
 	return nil
 }
@@ -697,4 +716,39 @@ func (l *envLoader) base64Secret(key string, dst *SecretBytes) {
 		return
 	}
 	*dst = SecretBytes(decoded)
+}
+
+func (l *envLoader) base64SecretMap(key string, dst *map[string]SecretBytes) {
+	v, ok := l.value(key)
+	if !ok || v == "" {
+		return
+	}
+	result := make(map[string]SecretBytes)
+	for _, entry := range strings.Split(v, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		parts := strings.SplitN(entry, ":", 2)
+		if len(parts) != 2 {
+			l.fail(key, fmt.Errorf("invalid key entry %q; expected id:base64", entry))
+			return
+		}
+		id := strings.TrimSpace(parts[0])
+		secretStr := strings.TrimSpace(parts[1])
+		if id == "" {
+			l.fail(key, errors.New("key ID cannot be empty"))
+			return
+		}
+		decoded, err := base64.StdEncoding.DecodeString(secretStr)
+		if err != nil {
+			decoded, err = base64.RawURLEncoding.DecodeString(secretStr)
+		}
+		if err != nil {
+			l.fail(key, fmt.Errorf("key %q: must be standard or unpadded URL-safe base64", id))
+			return
+		}
+		result[id] = SecretBytes(decoded)
+	}
+	*dst = result
 }

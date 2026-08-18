@@ -9,9 +9,11 @@ import (
 	"io"
 	"log/slog"
 	"mime"
+	"net"
 	"net/http"
 	"time"
 
+	"github.com/idan/secretmediabot/internal/metrics"
 	"github.com/idan/secretmediabot/internal/telegram"
 )
 
@@ -68,6 +70,7 @@ func New(cfg Config, readiness ReadinessChecker, updates UpdateProcessor, logger
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 	})
+	mux.Handle("GET /metrics", metrics.Handler())
 
 	if cfg.WebhookEnabled && updates != nil {
 		mux.Handle(WebhookPath, webhookHandler(cfg.WebhookSecret, updates, logger))
@@ -84,6 +87,18 @@ func New(cfg Config, readiness ReadinessChecker, updates UpdateProcessor, logger
 		},
 		logger: logger,
 	}
+}
+
+func (s *Server) Listen() (net.Listener, error) {
+	return net.Listen("tcp", s.httpServer.Addr)
+}
+
+func (s *Server) Serve(ln net.Listener) error {
+	err := s.httpServer.Serve(ln)
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
 }
 
 func (s *Server) ListenAndServe() error {

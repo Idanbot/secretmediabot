@@ -857,6 +857,40 @@ func TestPublicationFailureRecordsRetryPolicy(t *testing.T) {
 	}
 }
 
+func TestPublicationPermanentFailureNotifiesSender(t *testing.T) {
+	publication := service.Publication{
+		Whisper:      domain.Whisper{ID: uuid.New(), SourceChatID: -1001, SenderID: 101, PublishAttemptCount: 1},
+		Sender:       domain.User{TelegramUserID: 101, FirstName: "Alice"},
+		Recipient:    domain.User{TelegramUserID: 202, FirstName: "Bob"},
+		CallbackData: "w:opaque",
+	}
+	useCases := &fakeUseCases{
+		claimNext: func(context.Context) (service.Publication, error) { return publication, nil },
+		failPublish: func(_ context.Context, _ service.Publication, _ string, _ time.Duration) error {
+			return nil
+		},
+	}
+	var sentMessages []telegram.SendMessageRequest
+	tg := &fakeTelegram{sendMessage: func(_ context.Context, req telegram.SendMessageRequest) (telegram.Message, error) {
+		sentMessages = append(sentMessages, req)
+		if req.ChatID == -1001 {
+			// Fail the group envelope with 403 Forbidden (bot was kicked)
+			return telegram.Message{}, &telegram.APIError{StatusCode: 403, Description: "Forbidden: bot was kicked from the supergroup"}
+		}
+		return telegram.Message{MessageID: 77, Chat: telegram.Chat{ID: req.ChatID}}, nil
+	}}
+	didWork, err := testHandler(useCases, tg).PublishNext(context.Background())
+	if !didWork || err == nil {
+		t.Fatalf("PublishNext() = %v, %v", didWork, err)
+	}
+	if len(sentMessages) != 2 {
+		t.Fatalf("sent messages count = %d, want 2", len(sentMessages))
+	}
+	if sentMessages[1].ChatID != 101 || !strings.Contains(sentMessages[1].Text, "couldn't post the secret envelope") {
+		t.Fatalf("sender notification = %#v", sentMessages[1])
+	}
+}
+
 func TestPublicationSuccessCompletesLease(t *testing.T) {
 	publication := service.Publication{
 		Whisper: domain.Whisper{ID: uuid.New(), SourceChatID: -1001, ProtectContent: true},

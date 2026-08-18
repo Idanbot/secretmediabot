@@ -123,12 +123,19 @@ func run(parent context.Context) error {
 		return err
 	}
 
-	activeKey := append([]byte(nil), cfg.Media.EncryptionKey...)
-	keyring, err := secretcrypto.NewKeyring(cfg.Media.EncryptionKeyID, map[string][]byte{
-		cfg.Media.EncryptionKeyID: activeKey,
-	})
-	secretcrypto.Zero(activeKey)
+	keys := make(map[string][]byte, len(cfg.Media.PreviousKeys)+1)
+	keys[cfg.Media.EncryptionKeyID] = append([]byte(nil), cfg.Media.EncryptionKey...)
+	for id, prevKey := range cfg.Media.PreviousKeys {
+		keys[id] = append([]byte(nil), prevKey...)
+	}
+	keyring, err := secretcrypto.NewKeyring(cfg.Media.EncryptionKeyID, keys)
+	for _, key := range keys {
+		secretcrypto.Zero(key)
+	}
 	secretcrypto.Zero(cfg.Media.EncryptionKey)
+	for _, prevKey := range cfg.Media.PreviousKeys {
+		secretcrypto.Zero(prevKey)
+	}
 	if err != nil {
 		return fmt.Errorf("initialize content encryption: %w", err)
 	}
@@ -217,18 +224,31 @@ func run(parent context.Context) error {
 		return fmt.Errorf("initialize update processor: %w", err)
 	}
 
-	if err := configureTelegramTransport(parent, cfg, telegramClient); err != nil {
-		return err
-	}
-
 	server := httpserver.New(httpserver.Config{
 		Addr: cfg.HTTP.Addr, ReadHeaderTimeout: cfg.HTTP.ReadHeaderTimeout,
 		ReadTimeout: cfg.HTTP.ReadTimeout, WriteTimeout: cfg.HTTP.WriteTimeout,
 		IdleTimeout: cfg.HTTP.IdleTimeout, WebhookEnabled: cfg.Telegram.UpdateMode == config.UpdateModeWebhook,
 		WebhookSecret: cfg.Telegram.WebhookSecret,
 	}, database, processor, logger)
-	cleanup, err := app.NewCleanupWorker(
-		store, cfg.Cleanup.Interval, cfg.Cleanup.BatchSize, cfg.Cleanup.ProcessedUpdateRetention, logger,
+
+	ln, err := server.Listen()
+	if err != nil {
+		return fmt.Errorf("listen HTTP %s: %w", cfg.HTTP.Addr, err)
+	}
+	defer ln.Close()
+
+	if err := configureTelegramTransport(parent, cfg, telegramClient); err != nil {
+		return err
+	}
+
+	cleanup, err := app.NewCleanupWorkerWithOptions(
+		store, app.CleanupWorkerOptions{
+			Interval:                  cfg.Cleanup.Interval,
+			BatchSize:                 cfg.Cleanup.BatchSize,
+			ProcessedUpdateRetention:  cfg.Cleanup.ProcessedUpdateRetention,
+			ObservedIdentityRetention: cfg.Cleanup.ObservedIdentityRetention,
+			Notifier:                  handler,
+		}, logger,
 	)
 	if err != nil {
 		return fmt.Errorf("initialize cleanup worker: %w", err)
@@ -259,7 +279,7 @@ func run(parent context.Context) error {
 	}
 	runnersList := make([]func(context.Context) error, 0, 6)
 	runnersList = append(runnersList,
-		func(context.Context) error { return server.ListenAndServe() },
+		func(context.Context) error { return server.Serve(ln) },
 		cleanup.Run,
 		deleter.Run,
 		guestDeleter.Run,

@@ -11,6 +11,8 @@ services:
         COMMIT: ${COMMIT:-unknown}
     restart: unless-stopped
     init: true
+    security_opt:
+      - no-new-privileges:true
     env_file:
       - ${ENV_FILE:-.env}
     depends_on:
@@ -25,11 +27,24 @@ services:
       - /tmp:size=16m,mode=1777
     cap_drop:
       - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     stop_grace_period: 20s
 
   postgres:
     image: postgres:18.6-alpine3.24
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    shm_size: 128mb
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
@@ -40,6 +55,16 @@ services:
       - postgres_data:/var/lib/postgresql
     networks:
       - whisper
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -47,6 +72,34 @@ services:
       retries: 12
       start_period: 10s
     stop_grace_period: 30s
+
+  backup:
+    image: postgres:18.6-alpine3.24
+    profiles:
+      - backup
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - whisper
+    volumes:
+      - ${BACKUP_DIR:-./backups}:/backups
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        mkdir -p /backups
+        FILE="/backups/secretmediabot-$$(date +%Y%m%d_%H%M%S).sql.gz"
+        echo "Creating backup at $${FILE}..."
+        PGPASSWORD="$${POSTGRES_PASSWORD}" pg_dump -h postgres -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}" | gzip > "$${FILE}"
+        echo "Backup completed successfully."
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
 
 volumes:
   postgres_data:
