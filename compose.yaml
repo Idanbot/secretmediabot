@@ -11,8 +11,6 @@ services:
         COMMIT: ${COMMIT:-unknown}
     restart: unless-stopped
     init: true
-    security_opt:
-      - no-new-privileges:true
     env_file:
       - ${ENV_FILE:-.env}
     depends_on:
@@ -42,8 +40,6 @@ services:
   postgres:
     image: postgres:18.6-alpine3.24
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
     shm_size: 128mb
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
@@ -77,8 +73,6 @@ services:
     image: postgres:18.6-alpine3.24
     profiles:
       - backup
-    security_opt:
-      - no-new-privileges:true
     depends_on:
       postgres:
         condition: service_healthy
@@ -107,8 +101,6 @@ services:
       - monitoring
       - observability
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
     volumes:
       - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
@@ -134,8 +126,6 @@ services:
       - monitoring
       - observability
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
     environment:
       - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
@@ -162,8 +152,6 @@ services:
       - smoke
       - test
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
     networks:
       - whisper
     command:
