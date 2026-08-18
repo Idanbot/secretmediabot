@@ -53,11 +53,95 @@ jobs:
       - name: Run vet
         run: go vet ./...
 
-      - name: Run unit and integration-safe tests
-        run: go test -race ./...
+      - name: Run unit and integration-safe tests with coverage
+        run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
 
       - name: Run vulnerability scan
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+      - name: Upload test coverage artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-${{ github.sha }}
+          path: coverage.out
+          if-no-files-found: ignore
+
+  fuzz:
+    name: Fuzz testing smoke
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Fuzz command parser
+        run: go test -fuzz=^FuzzParse$ -fuzztime=5s ./internal/command
+
+      - name: Fuzz command target parser
+        run: go test -fuzz=^FuzzParseTarget$ -fuzztime=5s ./internal/command
+
+      - name: Fuzz callback token parser
+        run: go test -fuzz=^FuzzParseCallbackData$ -fuzztime=5s ./internal/token
+
+      - name: Fuzz constant-time comparator
+        run: go test -fuzz=^FuzzConstantTimeEqual$ -fuzztime=5s ./internal/httpserver
+
+  smoke:
+    name: Docker Compose smoke test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Create local test environment configuration
+        shell: bash
+        run: |
+          cp .env.example .env
+          key=$(openssl rand -base64 32)
+          sed -i "s|MEDIA_ENCRYPTION_KEY=.*|MEDIA_ENCRYPTION_KEY=$key|" .env
+          sed -i "s|TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=123456789:AAFakeTokenForSmokeTestOnly12345|" .env
+          sed -i "s|TELEGRAM_BOT_USERNAME=.*|TELEGRAM_BOT_USERNAME=smoketestbot|" .env
+          sed -i "s|OWNER_TELEGRAM_IDS=.*|OWNER_TELEGRAM_IDS=999999|" .env
+
+      - name: Start Docker Compose stack with monitoring
+        shell: bash
+        run: |
+          docker compose --profile monitoring up -d --build
+
+      - name: Wait for services to become healthy
+        shell: bash
+        run: |
+          echo "Waiting for PostgreSQL and Bot readiness..."
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8080/healthz > /dev/null && \
+               curl -sf http://127.0.0.1:8080/readyz > /dev/null && \
+               curl -sf http://127.0.0.1:8080/metrics > /dev/null && \
+               curl -sf http://127.0.0.1:9090/-/healthy > /dev/null && \
+               curl -sf http://127.0.0.1:3000/api/health > /dev/null; then
+              echo "All services (bot, postgres, prometheus, grafana) healthy!"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Services failed to become healthy in time"
+          docker compose --profile monitoring ps
+          docker compose --profile monitoring logs
+          exit 1
+
+      - name: Tear down Docker Compose
+        if: always()
+        shell: bash
+        run: |
+          docker compose --profile monitoring down -v
 
   lint:
     name: Lint
@@ -176,7 +260,7 @@ jobs:
 
   image:
     name: Build, scan, and publish image
-    needs: [quality, lint, integration, dockerfile, secrets, filesystem-security]
+    needs: [quality, fuzz, smoke, lint, integration, dockerfile, secrets, filesystem-security]
     runs-on: ubuntu-latest
     permissions:
       contents: read

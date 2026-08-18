@@ -705,4 +705,3 @@ func TestE2EPhotoWhisperFlow(t *testing.T) {
 		t.Fatalf("HandleUpdate(open photo callback) error = %v", err)
 	}
 }
-
