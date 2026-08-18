@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/Idanbot/secretmediabot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Idanbot/secretmediabot/actions/workflows/ci.yml)
 [![Go](https://img.shields.io/badge/Go-1.26.6-00ADD8?logo=go&logoColor=white)](go.mod)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Image](https://img.shields.io/badge/Image-GHCR-black)](https://github.com/Idanbot/secretmediabot/pkgs/container/secretmediabot)
 
 Secret Media Bot is a Go/PostgreSQL Telegram bot that delivers a private text secret — or one media item with an optional caption — to **exactly one person** in a shared group. The group only ever sees a public, content-free envelope with a one-time button; the secret itself arrives as a Telegram ephemeral message with `protect_content` enabled, then the bot requests its deletion.
@@ -17,7 +18,6 @@ The privacy claim is deliberately narrow: Telegram UI mechanics limit delivery t
 - [Getting started](#getting-started)
 - [Configuration](#configuration)
 - [Usage](#usage)
-- [Guest and inline requests](#guest-and-inline-requests)
 - [Development](#development)
 - [CI/CD and container images](#cicd-and-container-images)
 - [Privacy and threat model](#privacy-and-threat-model)
@@ -111,10 +111,6 @@ docker compose exec postgres sh -c 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES
 
 Stop with `docker compose down`. This keeps the named PostgreSQL volume; add `--volumes` only when you intentionally want to destroy local database data.
 
-### 3. Enable Guest and Inline mode in BotFather
-
-Guest Mode and Inline Mode are optional capabilities that must be enabled for the bot in BotFather; the bot logs a warning at startup when they are disabled. See [Guest and inline requests](#guest-and-inline-requests).
-
 ### Polling vs. webhook
 
 | Mode | When | Notes |
@@ -133,29 +129,32 @@ HTTP_WRITE_TIMEOUT=3m
 
 Webhook processing is synchronous, so `HTTP_WRITE_TIMEOUT` must be at least `MEDIA_DOWNLOAD_TIMEOUT + 3*TELEGRAM_REQUEST_TIMEOUT` (2m45s with the example defaults). A reverse proxy or tunnel must provide public TLS.
 
-Health routes:
+Health and metrics routes:
 
 ```text
-GET /healthz
-GET /readyz                          # checks PostgreSQL, does not call Telegram
-POST /telegram/webhook               # webhook mode only
+GET /healthz                          # Liveness probe (does not depend on DB)
+GET /readyz                           # Readiness probe (verifies PostgreSQL connectivity)
+GET /metrics                          # Prometheus metrics endpoint
+POST /telegram/webhook                # Telegram webhook endpoint (webhook mode only)
 ```
 
 ## Configuration
 
-Copy `.env.example` to `.env`. Required values:
+Copy `.env.example` to `.env`. Core configuration variables:
 
-| Variable | Meaning |
-| --- | --- |
-| `TELEGRAM_BOT_TOKEN` | BotFather token; secret. |
-| `TELEGRAM_BOT_USERNAME` | Bot username without `@` preferred. |
-| `OWNER_TELEGRAM_IDS` | Comma-separated positive Telegram user IDs for privileged operator commands; at least one required. |
-| `DATABASE_URL` | PostgreSQL DSN. The Compose value uses host `postgres`. |
-| `MEDIA_ENCRYPTION_KEY_ID` | Identifier stored beside new ciphertext; default `v1`. |
-| `MEDIA_ENCRYPTION_KEY` | Base64-encoded 32-byte AES key; secret, kept outside the database. |
-| `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | Required by the Compose PostgreSQL container. |
+| Variable | Meaning | Default / Notes |
+| --- | --- | --- |
+| `TELEGRAM_BOT_TOKEN` | BotFather bot token; secret. | Required. |
+| `TELEGRAM_BOT_USERNAME` | Bot username without `@`. | Required. |
+| `OWNER_TELEGRAM_IDS` | Comma-separated positive Telegram user IDs for privileged operator commands. | At least one required. |
+| `DATABASE_URL` | PostgreSQL DSN (`sslmode=require` enforced in production). | Required. |
+| `MEDIA_ENCRYPTION_KEY_ID` | Identifier stored beside new ciphertext. | `v1` |
+| `MEDIA_ENCRYPTION_KEY` | Base64-encoded 32-byte AES-256-GCM key; secret. | Required. |
+| `MEDIA_ENCRYPTION_PREVIOUS_KEYS` | Optional comma-separated previous keys for rotation (`id:base64,...`). | Optional. |
+| `OBSERVED_IDENTITY_RETENTION` | Retention duration for observed inactive chat members and users. | `2160h` (90 days) |
+| `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | Required by the Compose PostgreSQL service. | Required. |
 
-`.env.example` documents the complete configuration surface, including HTTP timeouts, Telegram polling/webhook behavior, the database pool, whisper TTLs and rate limits, media storage and retention, and cleanup intervals. Compose-only substitutions are `ENV_FILE`, `VERSION`, `COMMIT`, `HTTP_BIND_HOST` (default `127.0.0.1`), and `HTTP_PORT` (default `8080`). PostgreSQL is not published to the host.
+`.env.example` documents the complete configuration surface, including HTTP timeouts, Telegram polling/webhook behavior, connection pooling, whisper TTLs and rate limits, media storage, and background worker cleanup intervals. Compose-only substitutions are `ENV_FILE`, `VERSION`, `COMMIT`, `HTTP_BIND_HOST` (default `127.0.0.1`), and `HTTP_PORT` (default `8080`). PostgreSQL is not exposed to the public network.
 
 ## Usage
 
@@ -163,13 +162,30 @@ Copy `.env.example` to `.env`. Required values:
 
 | Command | Where | Behavior |
 | --- | --- | --- |
-| `/whisper` | Group / supergroup | Reply to a person's message to start a whisper. Configured as an ephemeral command where Telegram supports it. |
-| `/whisper @username` | Group / supergroup | Targets a username observed by the bot in that same chat. |
-| `/whisper 123456789` | Group / supergroup | Targets a numeric user ID observed in that same chat. |
-| `/start` | Private chat | Shows private composer guidance. A generated `/start compose_<token>` deep link resumes the sender's matching draft. |
-| `/cancel` | Private chat | Cancels the sender's active draft. |
-| `/privacy` | Group or private chat | Explains encryption, retention, and Telegram / deletion limitations. |
-| `/help` | Group or private chat | Shows usage guidance. |
+| `/whisper` | Group / supergroup | Reply to another member's message to start a private whisper draft. |
+| `/whisper @username` | Group / supergroup | Targets a specific username observed by the bot in that same group. |
+| `/whisper 123456789` | Group / supergroup | Targets a numeric Telegram user ID observed in that same group. |
+| `/start` | Private chat | Opens the bot composer or deep links directly to an active draft. |
+| `/cancel` | Private chat | Cancels the sender's active whisper draft. |
+| `/privacy` | Group or private chat | Displays the encryption model, retention periods, and privacy guarantees. |
+| `/help` | Group or private chat | Shows commands and usage guidance. |
+
+### How to send a whisper
+
+1. **Start the draft in a group**:
+   - Reply to any message sent by the intended recipient with `/whisper`.
+   - Alternatively, specify the recipient directly: `/whisper @username` or `/whisper <user_id>`.
+2. **Compose in private chat**:
+   - The bot opens (or deep-links you to) a private chat composer.
+   - Send your secret: either plaintext or exactly one media item (photo, voice message, video, audio, or document up to 20 MiB) with an optional caption.
+3. **Group envelope posted**:
+   - The bot encrypts the secret and posts a content-free envelope in the group containing an **Open secret** button.
+4. **One-time ephemeral delivery**:
+   - When the intended recipient presses **Open secret**, the secret is delivered directly to them as an ephemeral message with content forwarding protection (`protect_content=true`).
+   - Unauthorized attempts by other members are immediately rejected with an alert.
+   - A durable background deletion job is scheduled to request message deletion after the configured ephemeral delete window (default: 30 seconds).
+5. **Cancellation**:
+   - If you change your mind before the envelope is posted, send `/cancel` in private chat to abort the draft.
 
 ### Operator commands (privileged accounts only)
 
@@ -181,14 +197,6 @@ Accounts configured in `OWNER_TELEGRAM_IDS` have access to operational maintenan
 | `/owner_review <id>` | Private chat | Review metadata and delivery status for a specific whisper ID. |
 | `/owner_delete <id>` | Private chat | Hard-delete a stored whisper and its encrypted payloads immediately. |
 | `/owner_set_retention <id> <duration>` | Private chat | Adjust retention window for a specific whisper. |
-
-Only one draft may be active per sender (`MAX_ACTIVE_DRAFTS_PER_USER=1`). After `/whisper`, the bot either opens the existing private chat or provides a deep link. The sender then sends text, or exactly one photo, voice note, video, audio file, or document with an optional caption.
-
-## Guest and inline requests
-
-In a group where the bot is **not** a member, send `@bot_username @target` or `@bot_username 123456789` — never include the secret in that group message. Telegram sends a guest update, and the bot posts one opaque locked envelope. The sender follows its private link to add text or media; the target follows its private link to claim the request by numeric ID or username, receives the content in private chat, and the private message is deleted 30 seconds after Telegram accepts it.
-
-Inline Mode supports the same locked envelope from any chat. Inline results must never contain the secret or secret media: selecting a media result would make it visible to the group. Numeric IDs are authoritative; usernames are lookup hints verified when the target opens privately. Guest Mode provides no group history or participant directory and permits only the response to the triggering mention.
 
 ## Development
 
@@ -233,18 +241,25 @@ docker run --rm -v "$PWD:/repo:ro" hadolint/hadolint:latest hadolint /repo/Docke
 gitleaks detect --source . --redact --no-banner
 ```
 
+### Operations and Runbooks
+
+Step-by-step procedures for routine and incident response operations are detailed in [docs/runbooks.md](docs/runbooks.md):
+
+- **Automated Backup**: `docker compose --profile backup run --rm backup` (writes timestamped `.sql.gz` dumps to `./backups`).
+- **Key Rotation**: Non-disruptive rotation using `MEDIA_ENCRYPTION_PREVIOUS_KEYS`.
+- **Restore & Recovery**: Cold database restore procedures and incident handling.
+
 ## CI/CD and container images
 
 One GitHub Actions workflow ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on every push and on pull requests targeting `main`:
 
-1. **Quality gates** — Go formatting, `go vet`, `go test -race`, and `govulncheck`.
-2. **Lint** — golangci-lint.
-3. **Dockerfile lint** — Hadolint.
-4. **Secret scan** — Gitleaks over full history.
-5. **Filesystem security scan** — Trivy (vulnerabilities, secrets, misconfigurations).
-6. **Build and publish image** — runs only after the gates pass, so a failing check blocks publication.
-
-The image job builds `linux/amd64` and `linux/arm64` with Buildx, registry-backed caching, SBOM, and provenance attestations, then publishes to `ghcr.io/idanbot/secretmediabot`. On pull requests the image is built (not pushed) to validate it early.
+1. **Quality gates** — Go formatting, module verification (`go mod verify`), `go vet`, `go test -race`, and `govulncheck`.
+2. **Lint** — `golangci-lint` with strict error checking.
+3. **Database integration suite** — dedicated PostgreSQL 18 service job running full repository integration tests (`internal/repository/postgres_integration_test.go`).
+4. **Dockerfile lint** — Hadolint.
+5. **Secret scan** — Gitleaks over full Git commit history.
+6. **Filesystem security scan** — Trivy (vulnerabilities, secrets, misconfigurations).
+7. **Build, scan, and publish image** — builds the container image locally, performs an automated Trivy image vulnerability scan, and only publishes multi-arch images (`linux/amd64`, `linux/arm64`) to GHCR if all security scans pass cleanly.
 
 Tags: every push receives immutable `commit-<full-sha>` and `commit-<short-sha>` tags plus a branch tag; the `main` branch also receives the mutable `latest`; Git tags produce semantic-version tags. Each successful publish uploads a `compose-image.env` artifact containing the exact manifest digest. To deploy that exact image with Compose:
 
@@ -259,7 +274,7 @@ Local development keeps building from source:
 docker compose up -d --build
 ```
 
-`Dockerfile` uses a Go builder stage with BuildKit module/build caches and a minimal distroless runtime stage running as UID/GID `65532:65532` with a container `HEALTHCHECK` against `/readyz`.
+`Dockerfile` uses a Go builder stage with BuildKit module/build caches and a minimal distroless runtime stage running as non-root UID/GID `65532:65532` with all Linux capabilities dropped and a container `HEALTHCHECK` against `/healthz` (with a 60s startup period to allow for startup database migrations).
 
 ## Privacy and threat model
 
@@ -275,7 +290,6 @@ The full threat model — protected assets, trust boundaries, defenses, and expl
 ## Current caveats
 
 - No live Telegram end-to-end test has been performed. Bot API 10.2+ ephemeral methods and fields must be verified against the intended bot, group types, clients, and deployment region.
-- Guest and inline flows require the corresponding BotFather capabilities; guest responses are one-shot and Telegram provides no read receipt.
 - "One-time" is one accepted Telegram delivery, not exactly-once human viewing. A prolonged database failure after Telegram accepts a send can still permit a later duplicate delivery.
 - Envelope publication has the same cross-system boundary: a prolonged failure while recording an accepted Telegram send can produce a duplicate content-free envelope on retry.
 - The deletion queue is durable and defaults to 30 seconds after Telegram accepts delivery, but Telegram may reject deletion, the message may already be gone, or the recipient may capture it first.
