@@ -180,7 +180,13 @@ services:
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
-                res = {"ok": True, "result": {"id": 123456789, "is_bot": True, "first_name": "SmokeBot", "username": "smoketestbot", "can_join_groups": True, "can_read_all_group_messages": True, "supports_inline_queries": True, "supports_guest_queries": True}}
+                method = self.path.split('/')[-1].split('?')[0]
+                if method == 'getMe':
+                    res = {"ok": True, "result": {"id": 123456789, "is_bot": True, "first_name": "SmokeBot", "username": "smoketestbot", "can_join_groups": True, "can_read_all_group_messages": True, "supports_inline_queries": True, "supports_guest_queries": True}}
+                elif method == 'getUpdates':
+                    res = {"ok": True, "result": []}
+                else:
+                    res = {"ok": True, "result": True}
                 self.wfile.write(json.dumps(res).encode())
             def log_message(self, format, *args):
                 pass
