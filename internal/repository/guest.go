@@ -112,7 +112,7 @@ type GuestCreateParams struct {
 	MaxActivePerSender int
 	// RecentSince and MaxRecentPerSender bound new-request creation per hour.
 	// Zero disables the cap.
-	RecentSince       time.Time
+	RecentSince        time.Time
 	MaxRecentPerSender int
 }
 

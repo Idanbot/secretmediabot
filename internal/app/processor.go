@@ -144,6 +144,7 @@ func (p *UpdateProcessor) handleSafely(ctx context.Context, update telegram.Upda
 }
 
 func (p *UpdateProcessor) finishFail(ctx context.Context, updateID int64, leaseUntil time.Time, errorCode string) {
+	updatesFailed.Inc(errorCode)
 	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 	defer cancel()
 	_ = p.store.FailUpdate(finishCtx, repository.FinishUpdateParams{

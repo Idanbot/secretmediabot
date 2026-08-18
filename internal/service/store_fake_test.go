@@ -44,18 +44,18 @@ type memoryStore struct {
 	completed   []repository.CompleteOpenParams
 	failed      []repository.FailOpenParams
 
-	ownerWhispers   []domain.Whisper
-	ownerWhisper    domain.Whisper
+	ownerWhispers    []domain.Whisper
+	ownerWhisper     domain.Whisper
 	ownerContent     repository.StoredContent
 	ownerErr         error
 	whisperMediaBlob repository.WhisperMediaBlob
 	whisperMediaErr  error
-	ownerListCalls  int
-	ownerLists      []repository.OwnerListWhispersParams
-	ownerGetCalls   int
-	ownerReadCalls  int
-	ownerDeletes    []repository.OwnerDeleteWhisperParams
-	ownerRetentions []repository.OwnerUpdateRetentionParams
+	ownerListCalls   int
+	ownerLists       []repository.OwnerListWhispersParams
+	ownerGetCalls    int
+	ownerReadCalls   int
+	ownerDeletes     []repository.OwnerDeleteWhisperParams
+	ownerRetentions  []repository.OwnerUpdateRetentionParams
 }
 
 func newMemoryStore() *memoryStore {

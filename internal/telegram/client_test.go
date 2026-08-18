@@ -432,8 +432,7 @@ func TestGetUpdatesQuarantinesMalformedUpdates(t *testing.T) {
 func TestClientRefusesToFollowRedirects(t *testing.T) {
 	t.Parallel()
 
-	var redirectTarget *httptest.Server
-	redirectTarget = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	redirectTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		// If the client ever followed the redirect, the secret body would land
 		// here and the test would observe a request.
 		t.Error("client followed a cross-host redirect carrying the request body")

@@ -75,22 +75,22 @@ func TestNewBuildsOwnerAndChatAuthorizationSets(t *testing.T) {
 
 func validServiceOptions() Options {
 	return Options{
-		DraftTTL:                  10 * time.Minute,
-		WhisperTTL:                24 * time.Hour,
-		ContentRetention:          30 * 24 * time.Hour,
-		IngestLease:               2 * time.Minute,
-		OpenLease:                 30 * time.Second,
-		PublishLease:              2 * time.Minute,
-		EphemeralDeleteAfter:      30 * time.Second,
-		MaxMediaBytes:             20 * 1024 * 1024,
+		DraftTTL:                       10 * time.Minute,
+		WhisperTTL:                     24 * time.Hour,
+		ContentRetention:               30 * 24 * time.Hour,
+		IngestLease:                    2 * time.Minute,
+		OpenLease:                      30 * time.Second,
+		PublishLease:                   2 * time.Minute,
+		EphemeralDeleteAfter:           30 * time.Second,
+		MaxMediaBytes:                  20 * 1024 * 1024,
 		MaxActiveDraftsPerUser:         1,
 		MaxWhispersPerUserPerHour:      30,
 		MaxActiveGuestRequestsPerUser:  1,
 		MaxGuestRequestsPerUserPerHour: 6,
 		GuestModeEnabled:               true,
-		DefaultOneTime:            true,
-		ProtectContent:            true,
-		OwnerIDs:                  []int64{9001},
+		DefaultOneTime:                 true,
+		ProtectContent:                 true,
+		OwnerIDs:                       []int64{9001},
 	}
 }
 

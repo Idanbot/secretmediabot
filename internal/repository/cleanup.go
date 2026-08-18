@@ -8,11 +8,9 @@ import (
 	"gorm.io/gorm"
 )
 
-// CleanupParams bounds every retention sweep. All state-machine sweeps are
+// RunCleanup bounds every retention sweep. All state-machine sweeps are
 // batched: a large backlog after downtime must not produce one unbounded
 // transaction with long row locks and a WAL spike.
-type cleanupSweep struct{ sql string }
-
 func (s *Store) RunCleanup(ctx context.Context, params CleanupParams) (CleanupResult, error) {
 	db, err := s.withContext(ctx)
 	if err != nil {

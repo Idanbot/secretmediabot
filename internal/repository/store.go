@@ -13,16 +13,16 @@ import (
 )
 
 var (
-	ErrInvalidInput        = errors.New("repository invalid input")
-	ErrUnauthorized        = errors.New("repository unauthorized")
-	ErrExpired             = errors.New("repository record expired")
-	ErrNotActive           = errors.New("repository record is not active")
-	ErrAlreadyOpened       = errors.New("whisper already opened")
-	ErrLeaseLost           = errors.New("repository lease lost")
+	ErrInvalidInput  = errors.New("repository invalid input")
+	ErrUnauthorized  = errors.New("repository unauthorized")
+	ErrExpired       = errors.New("repository record expired")
+	ErrNotActive     = errors.New("repository record is not active")
+	ErrAlreadyOpened = errors.New("whisper already opened")
+	ErrLeaseLost     = errors.New("repository lease lost")
 	// ErrOpenAmbiguous marks a one-time whisper whose earlier reservation has
 	// neither completed nor failed, so the delivery outcome is unknowable.
 	// Re-opening would risk a duplicate delivery, so the open fails closed.
-	ErrOpenAmbiguous = errors.New("delivery outcome is ambiguous")
+	ErrOpenAmbiguous       = errors.New("delivery outcome is ambiguous")
 	ErrAmbiguousRecipient  = errors.New("observed username matches multiple users")
 	ErrTooManyActiveDrafts = errors.New("too many active drafts")
 	ErrWhisperRateLimit    = errors.New("whisper rate limit exceeded")

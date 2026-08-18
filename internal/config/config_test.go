@@ -104,7 +104,7 @@ func TestLoadFromLookupWebhook(t *testing.T) {
 func variedTestKey() []byte {
 	key := make([]byte, 32)
 	for index := range key {
-		key[index] = byte(index * 7 + 3)
+		key[index] = byte(index*7 + 3)
 	}
 	return key
 }
