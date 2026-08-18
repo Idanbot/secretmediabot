@@ -156,6 +156,41 @@ services:
           cpus: '1.0'
           memory: 512M
 
+  mock-telegram:
+    image: python:3.12-alpine
+    profiles:
+      - smoke
+      - test
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - whisper
+    command:
+      - python3
+      - -c
+      - |
+        import http.server, json
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.respond()
+            def do_POST(self):
+                self.respond()
+            def respond(self):
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                res = {"ok": True, "result": {"id": 123456789, "is_bot": True, "first_name": "SmokeBot", "username": "smoketestbot", "can_join_groups": True, "can_read_all_group_messages": True, "supports_inline_queries": True, "supports_guest_queries": True}}
+                self.wfile.write(json.dumps(res).encode())
+            def log_message(self, format, *args):
+                pass
+        http.server.HTTPServer(('0.0.0.0', 8081), Handler).serve_forever()
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+
 volumes:
   postgres_data:
   prometheus_data:

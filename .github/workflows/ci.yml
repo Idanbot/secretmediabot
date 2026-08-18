@@ -107,15 +107,17 @@ jobs:
         run: |
           cp .env.example .env
           key=$(openssl rand -base64 32)
+          sed -i "s|APP_ENV=.*|APP_ENV=development|" .env
           sed -i "s|MEDIA_ENCRYPTION_KEY=.*|MEDIA_ENCRYPTION_KEY=$key|" .env
           sed -i "s|TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=123456789:AAFakeTokenForSmokeTestOnly12345|" .env
           sed -i "s|TELEGRAM_BOT_USERNAME=.*|TELEGRAM_BOT_USERNAME=smoketestbot|" .env
+          sed -i "s|TELEGRAM_API_BASE_URL=.*|TELEGRAM_API_BASE_URL=http://mock-telegram:8081|" .env
           sed -i "s|OWNER_TELEGRAM_IDS=.*|OWNER_TELEGRAM_IDS=999999|" .env
 
       - name: Start Docker Compose stack with monitoring
         shell: bash
         run: |
-          docker compose --profile monitoring up -d --build
+          docker compose --profile monitoring --profile smoke up -d --build
 
       - name: Wait for services to become healthy
         shell: bash
@@ -133,15 +135,15 @@ jobs:
             sleep 2
           done
           echo "Services failed to become healthy in time"
-          docker compose --profile monitoring ps
-          docker compose --profile monitoring logs
+          docker compose --profile monitoring --profile smoke ps
+          docker compose --profile monitoring --profile smoke logs
           exit 1
 
       - name: Tear down Docker Compose
         if: always()
         shell: bash
         run: |
-          docker compose --profile monitoring down -v
+          docker compose --profile monitoring --profile smoke down -v
 
   lint:
     name: Lint
