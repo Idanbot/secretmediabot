@@ -21,6 +21,11 @@ type CreatedWhisper struct {
 	CallbackData string
 }
 
+func (w CreatedWhisper) String() string {
+	return fmt.Sprintf("service.CreatedWhisper{Whisper:%s, Recipient:%d, CallbackData:[REDACTED]}",
+		w.Whisper.ID, w.Recipient.TelegramUserID)
+}
+
 func (s *Service) ClaimIngest(ctx context.Context, senderID int64) (domain.Draft, error) {
 	now := s.now()
 	draft, err := s.store.ClaimLatestDraftIngest(ctx, senderID, now, now.Add(s.options.IngestLease))

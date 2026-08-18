@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,6 +18,11 @@ type Publication struct {
 	Sender       domain.User
 	Recipient    domain.User
 	CallbackData string
+}
+
+func (p Publication) String() string {
+	return fmt.Sprintf("service.Publication{Whisper:%s, Sender:%d, Recipient:%d, CallbackData:[REDACTED]}",
+		p.Whisper.ID, p.Sender.TelegramUserID, p.Recipient.TelegramUserID)
 }
 
 func (s *Service) ClaimPublication(ctx context.Context, whisperID uuid.UUID) (Publication, error) {

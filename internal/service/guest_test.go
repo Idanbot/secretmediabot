@@ -2,10 +2,14 @@ package service
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/idan/secretmediabot/internal/command"
+	"github.com/idan/secretmediabot/internal/domain"
 	"github.com/idan/secretmediabot/internal/repository"
 	"github.com/idan/secretmediabot/internal/secretcrypto"
 )
@@ -32,4 +36,70 @@ func TestGuestPayloadEncryptsAndDecryptsWithRequestBoundAAD(t *testing.T) {
 		t.Fatal("decryptGuestStored() accepted a payload under a different request ID")
 	}
 	secretcrypto.Zero(got)
+}
+
+func TestGuestPlaintextContentZeroClearsMemory(t *testing.T) {
+	t.Parallel()
+
+	content := GuestPlaintextContent{
+		Text:    []byte("sensitive text"),
+		Caption: []byte("sensitive caption"),
+	}
+	content.Zero()
+	if content.Text != nil || content.Caption != nil {
+		t.Fatal("content.Zero() did not clear text and caption pointers")
+	}
+}
+
+func TestServiceStructsRedactCallbackTokens(t *testing.T) {
+	t.Parallel()
+
+	pub := Publication{
+		CallbackData: "raw_callback_secret_token_12345",
+	}
+	if str := pub.String(); bytes.Contains([]byte(str), []byte("raw_callback_secret_token")) || !bytes.Contains([]byte(str), []byte("[REDACTED]")) {
+		t.Fatalf("Publication.String() failed to redact token: %s", str)
+	}
+
+	whisper := CreatedWhisper{
+		CallbackData: "raw_callback_secret_token_67890",
+	}
+	if str := whisper.String(); bytes.Contains([]byte(str), []byte("raw_callback_secret_token")) || !bytes.Contains([]byte(str), []byte("[REDACTED]")) {
+		t.Fatalf("CreatedWhisper.String() failed to redact token: %s", str)
+	}
+}
+
+type fakeGuestStore struct {
+	GuestStore
+}
+
+func (f *fakeGuestStore) CreateGuestRequest(ctx context.Context, params repository.GuestCreateParams) (repository.GuestRequest, error) {
+	return params.Request, nil
+}
+
+func TestCreateGuestRequestRejectsSelfTargeting(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{
+		guestStore: &fakeGuestStore{},
+		options: Options{
+			GuestModeEnabled: true,
+		},
+		now: time.Now,
+	}
+
+	_, err := svc.CreateGuestRequest(context.Background(), CreateGuestRequestParams{
+		Sender: domain.User{
+			TelegramUserID: 12345,
+			Username:       "Alice",
+		},
+		Target: command.Target{
+			Kind:     command.TargetUsername,
+			Username: "@alice",
+		},
+		GuestQueryID: "q1",
+	})
+	if !errors.Is(err, ErrTargetIsSender) {
+		t.Fatalf("expected ErrTargetIsSender, got %v", err)
+	}
 }

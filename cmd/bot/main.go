@@ -235,7 +235,7 @@ func run(parent context.Context) error {
 	if err != nil {
 		return fmt.Errorf("listen HTTP %s: %w", cfg.HTTP.Addr, err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	if err := configureTelegramTransport(parent, cfg, telegramClient); err != nil {
 		return err

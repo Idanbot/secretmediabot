@@ -1,5 +1,16 @@
 # Telegram Media Whisper Bot — V1 Build Specification
 
+> [!NOTE]
+> **Implementation Evolution Notice (Post-V1 Spec):**
+> This document represents the original design specification. The current implementation in this repository has evolved with significant architectural and cryptographic hardening:
+> 1. **Encrypted Persistence in PostgreSQL**: Media payloads, captions, and text secrets are encrypted at rest using AES-256-GCM (`internal/secretcrypto`) with purpose/row-bound authenticated data rather than relying solely on Telegram `file_id` retention.
+> 2. **Key Rotation**: Keyring multi-key support (`MEDIA_ENCRYPTION_PREVIOUS_KEYS`) enables non-disruptive key rotation.
+> 3. **Fail-Closed One-Time Guarantee**: One-time delivery fails closed if server crash occurs mid-delivery.
+> 4. **Ephemeral Message Auto-Deletion**: Durable deletion jobs clean up ephemeral messages after reading.
+> 5. **Guest Mode & Inline Queries**: Inline locked envelopes and guest query interactions in external chats.
+>
+> For the authoritative, current architecture, see [architecture.md](./architecture.md).
+
 > **Goal:** Build a small, production-capable Telegram bot in Go that lets a user send a private photo, voice note, video, audio file, or document to one specific person from the context of a Telegram group.
 >
 > **V1 stack:** Go + Docker Compose + PostgreSQL. Redis is optional and intentionally omitted from the default stack.

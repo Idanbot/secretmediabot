@@ -159,17 +159,28 @@ Copy `.env.example` to `.env`. Required values:
 
 ## Usage
 
-User commands:
+### User commands
 
 | Command | Where | Behavior |
 | --- | --- | --- |
-| `/whisper` | Group/supergroup | Reply to a person's message to start a whisper. Configured as an ephemeral command where Telegram supports it. |
-| `/whisper @username` | Group/supergroup | Targets a username observed by the bot in that same chat. |
-| `/whisper 123456789` | Group/supergroup | Targets a numeric user ID observed in that same chat. |
+| `/whisper` | Group / supergroup | Reply to a person's message to start a whisper. Configured as an ephemeral command where Telegram supports it. |
+| `/whisper @username` | Group / supergroup | Targets a username observed by the bot in that same chat. |
+| `/whisper 123456789` | Group / supergroup | Targets a numeric user ID observed in that same chat. |
 | `/start` | Private chat | Shows private composer guidance. A generated `/start compose_<token>` deep link resumes the sender's matching draft. |
-| `/cancel` | Private chat | Cancels the sender's one active draft. |
-| `/privacy` | Group/supergroup or private chat | Explains encryption, retention, and Telegram/deletion limitations. |
-| `/help` | Group/supergroup or private chat | Usage guidance. |
+| `/cancel` | Private chat | Cancels the sender's active draft. |
+| `/privacy` | Group or private chat | Explains encryption, retention, and Telegram / deletion limitations. |
+| `/help` | Group or private chat | Shows usage guidance. |
+
+### Operator commands (privileged accounts only)
+
+Accounts configured in `OWNER_TELEGRAM_IDS` have access to operational maintenance commands in private chat with the bot:
+
+| Command | Where | Behavior |
+| --- | --- | --- |
+| `/owner_list [limit]` | Private chat | List recent whispers for operational auditing. |
+| `/owner_review <id>` | Private chat | Review metadata and delivery status for a specific whisper ID. |
+| `/owner_delete <id>` | Private chat | Hard-delete a stored whisper and its encrypted payloads immediately. |
+| `/owner_set_retention <id> <duration>` | Private chat | Adjust retention window for a specific whisper. |
 
 Only one draft may be active per sender (`MAX_ACTIVE_DRAFTS_PER_USER=1`). After `/whisper`, the bot either opens the existing private chat or provides a deep link. The sender then sends text, or exactly one photo, voice note, video, audio file, or document with an optional caption.
 
@@ -268,11 +279,15 @@ The full threat model — protected assets, trust boundaries, defenses, and expl
 - "One-time" is one accepted Telegram delivery, not exactly-once human viewing. A prolonged database failure after Telegram accepts a send can still permit a later duplicate delivery.
 - Envelope publication has the same cross-system boundary: a prolonged failure while recording an accepted Telegram send can produce a duplicate content-free envelope on retry.
 - The deletion queue is durable and defaults to 30 seconds after Telegram accepts delivery, but Telegram may reject deletion, the message may already be gone, or the recipient may capture it first.
-- V1 supports one active encryption key from configuration. Key rotation tooling, external secret-manager integration, backup/WAL erasure procedures, and automated restoration drills are not included.
+- Key rotation is supported via `MEDIA_ENCRYPTION_PREVIOUS_KEYS`; see [docs/runbooks.md](docs/runbooks.md) for operational procedures.
 
 ## Documentation
 
 | Document | Contents |
 | --- | --- |
 | [docs/architecture.md](docs/architecture.md) | Component boundaries, data model, state machines, concurrency, retention, and threat model. |
-| [docs/telegram-media-whisper-v1.md](docs/telegram-media-whisper-v1.md) | The original V1 build specification. |
+| [docs/runbooks.md](docs/runbooks.md) | Operational runbooks for backups, restores, key rotation, and incident response. |
+| [docs/live-validation.md](docs/live-validation.md) | Manual validation checklist against live Telegram Bot API. |
+| [docs/progress.md](docs/progress.md) | Implementation progress log against the improvements backlog. |
+| [docs/improvements.md](docs/improvements.md) | Prioritized top-25 improvement backlog from the full-project review. |
+| [docs/telegram-media-whisper-v1.md](docs/telegram-media-whisper-v1.md) | Historical initial V1 build specification. |
