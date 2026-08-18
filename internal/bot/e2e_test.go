@@ -390,7 +390,7 @@ func (s *e2eStore) ClaimGuestTarget(ctx context.Context, params repository.Guest
 		return repository.GuestRequest{}, repository.ErrUnauthorized
 	}
 	if req.TargetUserID == nil && req.TargetUsername != "" &&
-		strings.ToLower(strings.TrimPrefix(params.User.Username, "@")) != strings.ToLower(strings.TrimPrefix(req.TargetUsername, "@")) {
+		!strings.EqualFold(strings.TrimPrefix(params.User.Username, "@"), strings.TrimPrefix(req.TargetUsername, "@")) {
 		return repository.GuestRequest{}, repository.ErrUnauthorized
 	}
 	if req.SenderID == params.User.TelegramUserID {
@@ -498,7 +498,7 @@ func (s *e2eStore) ClaimGuestOpen(ctx context.Context, params repository.GuestCl
 		return repository.GuestOpenReservation{}, repository.ErrUnauthorized
 	}
 	if req.TargetUserID == nil && req.TargetUsername != "" &&
-		strings.ToLower(strings.TrimPrefix(params.User.Username, "@")) != strings.ToLower(strings.TrimPrefix(req.TargetUsername, "@")) {
+		!strings.EqualFold(strings.TrimPrefix(params.User.Username, "@"), strings.TrimPrefix(req.TargetUsername, "@")) {
 		return repository.GuestOpenReservation{}, repository.ErrUnauthorized
 	}
 	if req.State == repository.GuestStateOpened {
