@@ -54,7 +54,7 @@ func (h *Handler) handleGuestMessage(ctx context.Context, message telegram.Messa
 		}
 		return h.answerGuestNotice(ctx, message.GuestQueryID, "I could not create that locked secret. Try again shortly.")
 	}
-	result := h.guestArticle(session, target, inlineResultID(h.botUsername, sender.TelegramUserID, target))
+	result := h.guestArticle(session, target, inlineResultID(h.botUsername, sender.TelegramUserID, target, ""))
 	requestCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
 	sent, err := h.telegram.AnswerGuestQuery(requestCtx, telegram.AnswerGuestQueryRequest{
 		GuestQueryID: message.GuestQueryID, Result: result,
@@ -73,66 +73,143 @@ func (h *Handler) handleInlineQuery(ctx context.Context, query telegram.InlineQu
 	if h.guest == nil || query.ID == "" {
 		return nil
 	}
-	target, err := command.ParseTarget(strings.TrimSpace(query.Query))
+	raw := strings.TrimSpace(query.Query)
+	if raw == "" {
+		return h.answerInlineHelp(ctx, query.ID)
+	}
+	target, secretText, err := parseInlineQuery(raw)
 	if err != nil {
-		return h.answerInlineNotice(ctx, query.ID, "Use @username or a numeric Telegram ID, then select the locked envelope.")
+		return h.answerInlineHelp(ctx, query.ID)
 	}
 	if query.From.ID <= 0 || query.From.IsBot {
 		return h.answerInlineNotice(ctx, query.ID, "Only human users can create locked secrets.")
 	}
-	session, err := h.guest.CreateGuestRequest(ctx, service.CreateGuestRequestParams{
-		Sender: domainUser(query.From), Target: target, InlineQueryID: query.ID,
-	})
-	if err != nil {
-		if text, expected := userMessage(err); expected {
-			return h.answerInlineNotice(ctx, query.ID, text)
+
+	var (
+		session service.GuestSession
+		article telegram.InlineQueryResultArticle
+	)
+
+	if secretText != "" {
+		session, err = h.guest.CreateGuestInlineSecret(ctx, service.CreateGuestInlineParams{
+			Sender: domainUser(query.From), Target: target, Text: secretText, InlineQueryID: query.ID,
+		})
+		if err != nil {
+			if text, expected := userMessage(err); expected {
+				return h.answerInlineNotice(ctx, query.ID, text)
+			}
+			return h.answerInlineNotice(ctx, query.ID, "I could not create that locked secret. Try again shortly.")
 		}
-		return h.answerInlineNotice(ctx, query.ID, "I could not create that locked secret. Try again shortly.")
+		article = h.guestInlineArticle(session, target, secretText, inlineResultID(h.botUsername, query.From.ID, target, secretText))
+	} else {
+		session, err = h.guest.CreateGuestRequest(ctx, service.CreateGuestRequestParams{
+			Sender: domainUser(query.From), Target: target, InlineQueryID: query.ID,
+		})
+		if err != nil {
+			if text, expected := userMessage(err); expected {
+				return h.answerInlineNotice(ctx, query.ID, text)
+			}
+			return h.answerInlineNotice(ctx, query.ID, "I could not create that locked secret. Try again shortly.")
+		}
+		article = h.guestArticle(session, target, inlineResultID(h.botUsername, query.From.ID, target, ""))
 	}
+
 	requestCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
 	err = h.telegram.AnswerInlineQuery(requestCtx, telegram.AnswerInlineQueryRequest{
-		InlineQueryID: query.ID, Results: []telegram.InlineQueryResultArticle{
-			h.guestArticle(session, target, inlineResultID(h.botUsername, query.From.ID, target)),
-		},
+		InlineQueryID: query.ID, Results: []telegram.InlineQueryResultArticle{article},
 		CacheTime: inlineResultCacheSeconds, IsPersonal: true,
 	})
 	cancel()
 	return err
 }
 
-// inlineResultID derives a stable inline result ID from the query text so
-// Telegram's inline cache can reuse the same envelope across repeated queries.
-func inlineResultID(botUsername string, senderID int64, target command.Target) string {
+func parseInlineQuery(query string) (command.Target, string, error) {
+	query = strings.TrimSpace(query)
+	fields := strings.Fields(query)
+	if len(fields) == 0 {
+		return command.Target{}, "", errors.New("empty query")
+	}
+	target, err := command.ParseTarget(fields[0])
+	if err != nil {
+		return command.Target{}, "", err
+	}
+	var secretText string
+	if len(fields) > 1 {
+		secretText = strings.TrimSpace(query[len(fields[0]):])
+	}
+	return target, secretText, nil
+}
+
+// inlineResultID derives a stable inline result ID from query parameters.
+func inlineResultID(botUsername string, senderID int64, target command.Target, text string) string {
 	targetText := target.Username
 	if target.Kind == command.TargetUserID {
 		targetText = fmt.Sprintf("id:%d", target.UserID)
 	}
-	digest := sha256.Sum256([]byte(botUsername + "|" + fmt.Sprintf("%d", senderID) + "|" + targetText))
+	digest := sha256.Sum256([]byte(botUsername + "|" + fmt.Sprintf("%d", senderID) + "|" + targetText + "|" + text))
 	return hex.EncodeToString(digest[:16])
+}
+
+func (h *Handler) guestInlineArticle(session service.GuestSession, target command.Target, text string, resultID string) telegram.InlineQueryResultArticle {
+	targetText := target.Username
+	if target.Kind == command.TargetUserID {
+		targetText = fmt.Sprintf("Telegram user %d", target.UserID)
+	} else if !strings.HasPrefix(targetText, "@") {
+		targetText = "@" + targetText
+	}
+	preview := text
+	if runes := []rune(preview); len(runes) > 40 {
+		preview = string(runes[:40]) + "..."
+	}
+	link := composeURL(h.botUsername, session.Parameter)
+	return telegram.InlineQueryResultArticle{
+		Type: "article", ID: resultID, Title: fmt.Sprintf("🔒 Send secret whisper to %s", targetText),
+		Description: fmt.Sprintf("Secret: %q (tap to post locked envelope)", preview),
+		InputMessageContent: telegram.InputTextMessageContent{
+			MessageText: fmt.Sprintf("🔒 Locked secret for %s.\nOnly they can open it.", targetText),
+		},
+		ReplyMarkup: &telegram.InlineKeyboardMarkup{InlineKeyboard: [][]telegram.InlineKeyboardButton{{
+			{Text: "🔓 Open Secret", URL: link},
+		}}},
+	}
 }
 
 func (h *Handler) guestArticle(session service.GuestSession, target command.Target, resultID string) telegram.InlineQueryResultArticle {
 	targetText := target.Username
 	if target.Kind == command.TargetUserID {
 		targetText = fmt.Sprintf("Telegram user %d", target.UserID)
+	} else if !strings.HasPrefix(targetText, "@") {
+		targetText = "@" + targetText
 	}
-	description := "The secret is added privately and opened privately."
-	if target.Kind == command.TargetUsername {
-		// Telegram usernames are mutable: the first person holding this
-		// username who opens the envelope privately receives the secret.
-		description = "The secret is added privately and opened privately. Usernames can change; prefer a numeric ID for certainty."
-	}
+	description := "Tap to post envelope, then add text or media privately in DM."
 	link := composeURL(h.botUsername, session.Parameter)
 	return telegram.InlineQueryResultArticle{
-		Type: "article", ID: resultID, Title: "Locked secret",
+		Type: "article", ID: resultID, Title: fmt.Sprintf("🔒 Locked secret envelope for %s", targetText),
 		Description: description,
 		InputMessageContent: telegram.InputTextMessageContent{
-			MessageText: fmt.Sprintf("Locked secret for %s. The secret content is not posted in this group.", targetText),
+			MessageText: fmt.Sprintf("🔒 Locked secret for %s.\nThe secret content is not posted in this chat.", targetText),
 		},
 		ReplyMarkup: &telegram.InlineKeyboardMarkup{InlineKeyboard: [][]telegram.InlineKeyboardButton{{
-			{Text: "Add or open privately", URL: link},
+			{Text: "➕ Add or open privately", URL: link},
 		}}},
 	}
+}
+
+func (h *Handler) answerInlineHelp(ctx context.Context, queryID string) error {
+	requestCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
+	defer cancel()
+	return h.telegram.AnswerInlineQuery(requestCtx, telegram.AnswerInlineQueryRequest{
+		InlineQueryID: queryID, CacheTime: 0, IsPersonal: true,
+		Results: []telegram.InlineQueryResultArticle{{
+			Type:        "article",
+			ID:          "inline-help",
+			Title:       "🔒 Secret Whisper",
+			Description: "Type: @username <secret message> or 123456789 <secret message>",
+			InputMessageContent: telegram.InputTextMessageContent{
+				MessageText: "To send a secret whisper, type in any chat:\n@" + h.botUsername + " @username your secret message",
+			},
+		}},
+	})
 }
 
 func (h *Handler) answerGuestNotice(ctx context.Context, queryID, text string) error {
@@ -155,6 +232,7 @@ func (h *Handler) answerInlineNotice(ctx context.Context, queryID, text string) 
 		InlineQueryID: queryID, CacheTime: 0, IsPersonal: true,
 		Results: []telegram.InlineQueryResultArticle{{
 			Type: "article", ID: "inline-error", Title: "Locked secret unavailable",
+			Description: text,
 			InputMessageContent: telegram.InputTextMessageContent{MessageText: text},
 		}},
 	})

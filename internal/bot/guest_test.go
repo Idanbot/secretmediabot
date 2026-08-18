@@ -33,6 +33,17 @@ func (f *fakeGuestUseCases) CreateGuestRequest(ctx context.Context, params servi
 	return service.GuestSession{}, nil
 }
 
+func (f *fakeGuestUseCases) CreateGuestInlineSecret(ctx context.Context, params service.CreateGuestInlineParams) (service.GuestSession, error) {
+	return service.GuestSession{
+		Request: repository.GuestRequest{
+			ID:          uuid.New(),
+			State:       repository.GuestStateReady,
+			PayloadKind: domain.PayloadText,
+		},
+		Parameter: "guest_inline_secret_token",
+	}, nil
+}
+
 func (f *fakeGuestUseCases) MarkGuestEnvelope(ctx context.Context, parameter, inlineID string) error {
 	f.markedParam = parameter + ":" + inlineID
 	if f.mark != nil {
@@ -164,3 +175,45 @@ func TestGuestPrivateOpenSendsAndCompletes(t *testing.T) {
 		t.Fatalf("messages/completion = %#v/%d", tg.messages, guest.completedID)
 	}
 }
+
+func TestInlineQueryDirectSecretMessage(t *testing.T) {
+	tg := &fakeTelegram{}
+	guest := &fakeGuestUseCases{}
+	h := testHandler(&fakeUseCases{}, tg)
+	h.guest = guest
+
+	// User types @bot @target_user Here is the secret code 12345
+	err := h.HandleUpdate(context.Background(), telegram.Update{
+		InlineQuery: &telegram.InlineQuery{
+			ID:    "query_direct_1",
+			From:  telegram.User{ID: 101, Username: "sender_user"},
+			Query: "@target_user Here is the secret code 12345",
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleUpdate(InlineQuery) error = %v", err)
+	}
+
+	if len(tg.inlineAnswers) != 1 {
+		t.Fatalf("expected 1 inline answer, got %d", len(tg.inlineAnswers))
+	}
+	ans := tg.inlineAnswers[0]
+	if len(ans.Results) != 1 {
+		t.Fatalf("expected 1 inline article result, got %d", len(ans.Results))
+	}
+	article := ans.Results[0]
+	if !strings.Contains(article.Title, "@target_user") {
+		t.Fatalf("expected article title to mention target, got %q", article.Title)
+	}
+	if len(article.ReplyMarkup.InlineKeyboard) != 1 || len(article.ReplyMarkup.InlineKeyboard[0]) != 1 {
+		t.Fatalf("expected 1 button in reply markup, got %#v", article.ReplyMarkup)
+	}
+	button := article.ReplyMarkup.InlineKeyboard[0][0]
+	if button.Text != "🔓 Open Secret" {
+		t.Fatalf("expected button text '🔓 Open Secret', got %q", button.Text)
+	}
+	if !strings.Contains(button.URL, "guest_inline_secret_token") {
+		t.Fatalf("expected button URL to contain guest token, got %q", button.URL)
+	}
+}
+

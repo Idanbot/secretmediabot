@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -103,3 +104,38 @@ func TestCreateGuestRequestRejectsSelfTargeting(t *testing.T) {
 		t.Fatalf("expected ErrTargetIsSender, got %v", err)
 	}
 }
+
+func TestCreateGuestInlineSecret(t *testing.T) {
+	t.Parallel()
+
+	keyring := newServiceTestKeyring(t)
+	svc := &Service{
+		guestStore: &fakeGuestStore{},
+		cipher:     keyring,
+		options: Options{
+			GuestModeEnabled: true,
+			WhisperTTL:       time.Hour,
+			ContentRetention: 24 * time.Hour,
+		},
+		now: time.Now,
+	}
+
+	session, err := svc.CreateGuestInlineSecret(context.Background(), CreateGuestInlineParams{
+		Sender: domain.User{TelegramUserID: 101, Username: "Alice"},
+		Target: command.Target{Kind: command.TargetUsername, Username: "bobby_user"},
+		Text:   "Confidential invoice #1049",
+	})
+	if err != nil {
+		t.Fatalf("CreateGuestInlineSecret error = %v", err)
+	}
+	if session.Request.State != repository.GuestStateReady {
+		t.Fatalf("expected GuestStateReady, got %v", session.Request.State)
+	}
+	if session.Request.PayloadKind != domain.PayloadText {
+		t.Fatalf("expected domain.PayloadText, got %v", session.Request.PayloadKind)
+	}
+	if session.Parameter == "" || !strings.HasPrefix(session.Parameter, GuestPrefix) {
+		t.Fatalf("expected guest parameter prefix, got %q", session.Parameter)
+	}
+}
+

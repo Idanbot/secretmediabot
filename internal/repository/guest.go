@@ -103,10 +103,11 @@ type GuestPrivateDeleteJob struct {
 }
 
 type GuestCreateParams struct {
-	Request GuestRequest
-	Sender  domain.User
-	Chat    *domain.Chat
-	Now     time.Time
+	Request            GuestRequest
+	Sender             domain.User
+	Chat               *domain.Chat
+	TextPayload        *GuestPayload
+	Now                time.Time
 	// MaxActivePerSender bounds concurrently active requests (awaiting,
 	// ingesting, or ready). Zero disables the cap.
 	MaxActivePerSender int
@@ -326,10 +327,10 @@ func (s *Store) CreateGuestRequest(ctx context.Context, params GuestCreateParams
 			}
 		}
 		for _, existing := range active {
-			if existing.State != GuestStateAwaitingSecret {
-				// A secret is being ingested or is already waiting for the
-				// target: the sender must finish or cancel it first.
-				return fmt.Errorf("%w: sender %d has an active guest request", ErrGuestActiveLimit, request.SenderID)
+			if existing.State == GuestStateIngestingSecret {
+				// A secret is currently being ingested in the private composer:
+				// the sender must finish or cancel that active composer draft first.
+				return fmt.Errorf("%w: sender %d has an active composer draft", ErrGuestActiveLimit, request.SenderID)
 			}
 		}
 		if params.MaxActivePerSender > 0 && len(active)+1 > params.MaxActivePerSender {
@@ -365,6 +366,15 @@ func (s *Store) CreateGuestRequest(ctx context.Context, params GuestCreateParams
 		if params.Chat != nil {
 			if err := upsertChat(tx, *params.Chat, now); err != nil {
 				return err
+			}
+		}
+		if params.TextPayload != nil {
+			if err := validateGuestPayload(*params.TextPayload, now); err != nil {
+				return err
+			}
+			payloadRow := guestPayloadRowFromDomain(*params.TextPayload)
+			if err := tx.Create(&payloadRow).Error; err != nil {
+				return translateError(err)
 			}
 		}
 		return tx.Create(&row).Error

@@ -136,6 +136,69 @@ func (s *Service) CreateGuestRequest(ctx context.Context, params CreateGuestRequ
 	return GuestSession{Request: request, Parameter: GuestPrefix + guestToken.Raw}, nil
 }
 
+type CreateGuestInlineParams struct {
+	Sender        domain.User
+	Target        command.Target
+	Text          string
+	InlineQueryID string
+}
+
+func (s *Service) CreateGuestInlineSecret(ctx context.Context, params CreateGuestInlineParams) (GuestSession, error) {
+	if s.guestStore == nil || !s.options.GuestModeEnabled {
+		return GuestSession{}, ErrGuestUnavailable
+	}
+	if params.Sender.TelegramUserID <= 0 || params.Sender.IsBot {
+		return GuestSession{}, ErrTargetRequired
+	}
+	text := strings.TrimSpace(params.Text)
+	if text == "" {
+		return GuestSession{}, ErrUnsupportedContent
+	}
+	if len([]rune(text)) > MaxSecretTextRunes {
+		return GuestSession{}, ErrTextTooLong
+	}
+	now := s.now()
+	guestToken, err := token.Generate()
+	if err != nil {
+		return GuestSession{}, err
+	}
+	request := repository.GuestRequest{
+		ID: uuid.New(), TokenHash: guestToken.Hash[:], SenderID: params.Sender.TelegramUserID,
+		State: repository.GuestStateReady, PayloadKind: domain.PayloadText,
+		InlineQueryID: params.InlineQueryID, CreatedAt: now, UpdatedAt: now,
+		SecretReadyAt: &now,
+		ExpiresAt:     now.Add(s.options.WhisperTTL), RetentionDeleteAt: now.Add(s.options.ContentRetention),
+	}
+	switch params.Target.Kind {
+	case command.TargetUserID:
+		request.TargetUserID = cloneInt64(&params.Target.UserID)
+	case command.TargetUsername:
+		normalized := strings.ToLower(strings.TrimPrefix(params.Target.Username, "@"))
+		if normalized == normalizeUsernameHint(params.Sender.Username) {
+			return GuestSession{}, ErrTargetIsSender
+		}
+		request.TargetUsername = normalized
+	default:
+		return GuestSession{}, ErrTargetRequired
+	}
+
+	payload, err := s.encryptGuestPayload(secretcrypto.PurposeText, request.ID, []byte(text), "text/plain; charset=utf-8", now.Add(s.options.ContentRetention))
+	if err != nil {
+		return GuestSession{}, err
+	}
+
+	request, err = s.guestStore.CreateGuestRequest(ctx, repository.GuestCreateParams{
+		Request: request, Sender: params.Sender, Now: now,
+		TextPayload:        &payload,
+		MaxActivePerSender: s.options.MaxActiveGuestRequestsPerUser,
+		RecentSince:        now.Add(-time.Hour), MaxRecentPerSender: s.options.MaxGuestRequestsPerUserPerHour,
+	})
+	if err != nil {
+		return GuestSession{}, mapGuestRepositoryError(err)
+	}
+	return GuestSession{Request: request, Parameter: GuestPrefix + guestToken.Raw}, nil
+}
+
 func normalizeUsernameHint(value string) string {
 	return strings.ToLower(strings.TrimPrefix(strings.TrimSpace(value), "@"))
 }
