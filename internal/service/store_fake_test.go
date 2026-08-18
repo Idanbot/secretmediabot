@@ -46,8 +46,10 @@ type memoryStore struct {
 
 	ownerWhispers   []domain.Whisper
 	ownerWhisper    domain.Whisper
-	ownerContent    repository.StoredContent
-	ownerErr        error
+	ownerContent     repository.StoredContent
+	ownerErr         error
+	whisperMediaBlob repository.WhisperMediaBlob
+	whisperMediaErr  error
 	ownerListCalls  int
 	ownerLists      []repository.OwnerListWhispersParams
 	ownerGetCalls   int
@@ -268,6 +270,12 @@ func (s *memoryStore) OwnerUpdateRetention(_ context.Context, params repository.
 	defer s.mu.Unlock()
 	s.ownerRetentions = append(s.ownerRetentions, params)
 	return s.ownerErr
+}
+
+func (s *memoryStore) FetchWhisperMedia(context.Context, uuid.UUID) (repository.WhisperMediaBlob, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.whisperMediaBlob, s.whisperMediaErr
 }
 
 func (s *memoryStore) addMember(chatID int64, user domain.User) {

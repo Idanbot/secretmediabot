@@ -75,6 +75,20 @@ func (s *Store) ReserveOpen(ctx context.Context, params ReserveOpenParams) (Open
 				deniedErr = ErrNotActive
 				return recordDeniedOpen(tx, whisper.ID, params, domain.OpenDeniedNotActive)
 			}
+			// A one-time whisper whose lease expired without a completed or
+			// failed event may already have been delivered (process crash, lost
+			// finalization). Re-opening would risk a duplicate one-time
+			// delivery, so the open fails closed until the whisper expires.
+			if whisper.OneTime {
+				lingering, err := hasReservedOpenEvent(tx, whisper.ID)
+				if err != nil {
+					return err
+				}
+				if lingering {
+					deniedErr = ErrOpenAmbiguous
+					return recordDeniedOpen(tx, whisper.ID, params, domain.OpenDeniedAmbiguous)
+				}
+			}
 			if err := tx.Model(&whisperRow{}).Where("id = ?", whisper.ID).Updates(map[string]any{
 				"status":                    string(domain.WhisperActive),
 				"opening_callback_query_id": nil,
@@ -299,6 +313,19 @@ func (s *Store) FailOpen(ctx context.Context, params FailOpenParams) error {
 }
 
 func recordDeniedOpen(tx *gorm.DB, whisperID uuid.UUID, params ReserveOpenParams, outcome domain.OpenEventOutcome) error {
+	now := nowOr(params.Now)
+	// A mis-clicking or probing user can press the button many times per
+	// minute. Cap denial audit rows at one per (whisper, user) per minute and
+	// reject the extras silently.
+	var recent int64
+	if err := tx.Model(&openEventRow{}).
+		Where("whisper_id = ? AND telegram_user_id = ? AND created_at > ?", whisperID, params.TelegramUserID, now.Add(-time.Minute)).
+		Count(&recent).Error; err != nil {
+		return translateError(err)
+	}
+	if recent > 0 {
+		return nil
+	}
 	callbackID := params.CallbackQueryID
 	reason := string(outcome)
 	event := openEventRow{
@@ -309,12 +336,24 @@ func recordDeniedOpen(tx *gorm.DB, whisperID uuid.UUID, params ReserveOpenParams
 		Allowed:         false,
 		DenialReason:    &reason,
 		DeliveryState:   "not_attempted",
-		CreatedAt:       nowOr(params.Now),
+		CreatedAt:       now,
 	}
 	if err := tx.Create(&event).Error; err != nil {
 		return translateError(err)
 	}
 	return nil
+}
+
+// hasReservedOpenEvent reports whether a whisper has an open event whose
+// delivery is still marked reserved, meaning its outcome is unknowable.
+func hasReservedOpenEvent(tx *gorm.DB, whisperID uuid.UUID) (bool, error) {
+	var count int64
+	if err := tx.Model(&openEventRow{}).
+		Where("whisper_id = ? AND delivery_state = 'reserved'", whisperID).
+		Count(&count).Error; err != nil {
+		return false, translateError(err)
+	}
+	return count > 0, nil
 }
 
 func expireLockedWhisper(tx *gorm.DB, whisperID uuid.UUID, now time.Time) error {

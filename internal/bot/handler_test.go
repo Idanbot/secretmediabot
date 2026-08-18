@@ -19,27 +19,32 @@ import (
 )
 
 type fakeUseCases struct {
-	observeMembership func(context.Context, domain.User, domain.Chat) error
-	registerPrivate   func(context.Context, domain.User) (domain.User, error)
-	createDraft       func(context.Context, service.CreateDraftRequest) (service.CreateDraftResult, error)
-	resumeDraft       func(context.Context, domain.User, string) (service.ResumeDraftResult, error)
-	cancelDraft       func(context.Context, int64) (domain.Draft, error)
-	claimIngest       func(context.Context, int64) (domain.Draft, error)
-	releaseIngest     func(context.Context, domain.Draft) error
-	finalizeText      func(context.Context, domain.Draft, string) (service.CreatedWhisper, error)
-	finalizeMedia     func(context.Context, domain.Draft, domain.MediaReference, []byte, string) (service.CreatedWhisper, error)
-	claimPublication  func(context.Context, uuid.UUID) (service.Publication, error)
-	claimNext         func(context.Context) (service.Publication, error)
-	completePublish   func(context.Context, service.Publication, int64) error
-	failPublish       func(context.Context, service.Publication, string, time.Duration) error
-	reserveOpen       func(context.Context, string, int64, string) (service.OpenDelivery, error)
-	completeOpen      func(context.Context, service.OpenDelivery, int64) error
-	failOpen          func(context.Context, service.OpenDelivery, string) error
-	isOwner           func(int64) bool
-	ownerList         func(context.Context, int64, int, int) ([]domain.Whisper, error)
-	ownerReview       func(context.Context, int64, uuid.UUID) (service.OwnerReview, error)
-	ownerDelete       func(context.Context, int64, uuid.UUID) error
-	ownerRetention    func(context.Context, int64, uuid.UUID, time.Duration) error
+	observeMembership    func(context.Context, domain.User, domain.Chat) error
+	registerPrivate      func(context.Context, domain.User) (domain.User, error)
+	createDraft          func(context.Context, service.CreateDraftRequest) (service.CreateDraftResult, error)
+	resumeDraft          func(context.Context, domain.User, string) (service.ResumeDraftResult, error)
+	cancelDraft          func(context.Context, int64) (domain.Draft, error)
+	claimIngest          func(context.Context, int64) (domain.Draft, error)
+	releaseIngest        func(context.Context, domain.Draft) error
+	finalizeText         func(context.Context, domain.Draft, string) (service.CreatedWhisper, error)
+	finalizeMedia        func(context.Context, domain.Draft, domain.MediaReference, []byte, string) (service.CreatedWhisper, error)
+	claimPublication     func(context.Context, uuid.UUID) (service.Publication, error)
+	claimNext            func(context.Context) (service.Publication, error)
+	completePublish      func(context.Context, service.Publication, int64) error
+	failPublish          func(context.Context, service.Publication, string, time.Duration) error
+	reserveOpen          func(context.Context, string, int64, string) (service.OpenDelivery, error)
+	completeOpen         func(context.Context, service.OpenDelivery, int64) error
+	failOpen             func(context.Context, service.OpenDelivery, string) error
+	whisperMediaFallback func() ([]byte, domain.MediaType, string, error)
+	whisperMedia         []byte
+	whisperMediaType     domain.MediaType
+	whisperMediaCT       string
+	whisperMediaErr      error
+	isOwner              func(int64) bool
+	ownerList            func(context.Context, int64, int, int) ([]domain.Whisper, error)
+	ownerReview          func(context.Context, int64, uuid.UUID) (service.OwnerReview, error)
+	ownerDelete          func(context.Context, int64, uuid.UUID) error
+	ownerRetention       func(context.Context, int64, uuid.UUID, time.Duration) error
 }
 
 func (f *fakeUseCases) ObserveMembership(ctx context.Context, user domain.User, chat domain.Chat) error {
@@ -147,11 +152,22 @@ func (f *fakeUseCases) CompleteOpen(ctx context.Context, delivery service.OpenDe
 	return nil
 }
 
+func (f *fakeUseCases) WhisperMediaFallback(context.Context, uuid.UUID) ([]byte, domain.MediaType, string, error) {
+	if f.whisperMediaFallback != nil {
+		return f.whisperMediaFallback()
+	}
+	return f.whisperMedia, f.whisperMediaType, f.whisperMediaCT, f.whisperMediaErr
+}
+
 func (f *fakeUseCases) FailOpen(ctx context.Context, delivery service.OpenDelivery, code string) error {
 	if f.failOpen != nil {
 		return f.failOpen(ctx, delivery, code)
 	}
 	return nil
+}
+
+func (f *fakeUseCases) HasActiveDraft(context.Context, int64) (bool, error) {
+	return false, nil
 }
 
 func (f *fakeUseCases) IsOwner(userID int64) bool {
@@ -187,17 +203,19 @@ func (f *fakeUseCases) OwnerSetRetention(ctx context.Context, ownerID int64, id 
 }
 
 type fakeTelegram struct {
-	sendMessage        func(context.Context, telegram.SendMessageRequest) (telegram.Message, error)
-	answerCallback     func(context.Context, telegram.AnswerCallbackQueryRequest) error
-	answerGuest        func(context.Context, telegram.AnswerGuestQueryRequest) (telegram.SentGuestMessage, error)
-	answerInline       func(context.Context, telegram.AnswerInlineQueryRequest) error
-	getFile            func(context.Context, telegram.GetFileRequest) (telegram.File, error)
-	downloadFile       func(context.Context, string) ([]byte, error)
-	sendEphemeralText  func(context.Context, telegram.SendEphemeralTextRequest) (int64, error)
-	sendEphemeralMedia func(context.Context, telegram.SendEphemeralMediaRequest) (int64, error)
-	sendPrivateByID    func(context.Context, telegram.SendPrivateMediaByFileIDRequest) (telegram.Message, error)
-	sendPrivateMedia   func(context.Context, telegram.SendPrivateMediaRequest) (telegram.Message, error)
-	deleteMessage      func(context.Context, telegram.DeleteMessageRequest) error
+	sendMessage              func(context.Context, telegram.SendMessageRequest) (telegram.Message, error)
+	answerCallback           func(context.Context, telegram.AnswerCallbackQueryRequest) error
+	answerGuest              func(context.Context, telegram.AnswerGuestQueryRequest) (telegram.SentGuestMessage, error)
+	answerInline             func(context.Context, telegram.AnswerInlineQueryRequest) error
+	getFile                  func(context.Context, telegram.GetFileRequest) (telegram.File, error)
+	downloadFile             func(context.Context, string, int64) ([]byte, error)
+	sendEphemeralText        func(context.Context, telegram.SendEphemeralTextRequest) (int64, error)
+	sendEphemeralMedia       func(context.Context, telegram.SendEphemeralMediaRequest) (int64, error)
+	sendEphemeralMediaUpload func(context.Context, telegram.SendEphemeralMediaUploadRequest) (int64, error)
+	mediaUploads             []telegram.SendEphemeralMediaUploadRequest
+	sendPrivateByID          func(context.Context, telegram.SendPrivateMediaByFileIDRequest) (telegram.Message, error)
+	sendPrivateMedia         func(context.Context, telegram.SendPrivateMediaRequest) (telegram.Message, error)
+	deleteMessage            func(context.Context, telegram.DeleteMessageRequest) error
 
 	messages       []telegram.SendMessageRequest
 	answers        []telegram.AnswerCallbackQueryRequest
@@ -249,9 +267,9 @@ func (f *fakeTelegram) GetFile(ctx context.Context, request telegram.GetFileRequ
 	return telegram.File{}, nil
 }
 
-func (f *fakeTelegram) DownloadFile(ctx context.Context, path string) ([]byte, error) {
+func (f *fakeTelegram) DownloadFile(ctx context.Context, path string, expectedSize int64) ([]byte, error) {
 	if f.downloadFile != nil {
-		return f.downloadFile(ctx, path)
+		return f.downloadFile(ctx, path, expectedSize)
 	}
 	return nil, nil
 }
@@ -270,6 +288,14 @@ func (f *fakeTelegram) SendEphemeralMedia(ctx context.Context, request telegram.
 		return f.sendEphemeralMedia(ctx, request)
 	}
 	return 902, nil
+}
+
+func (f *fakeTelegram) SendEphemeralMediaUpload(ctx context.Context, request telegram.SendEphemeralMediaUploadRequest) (int64, error) {
+	f.mediaUploads = append(f.mediaUploads, request)
+	if f.sendEphemeralMediaUpload != nil {
+		return f.sendEphemeralMediaUpload(ctx, request)
+	}
+	return 905, nil
 }
 
 func (f *fakeTelegram) SendPrivateMediaByFileID(ctx context.Context, request telegram.SendPrivateMediaByFileIDRequest) (telegram.Message, error) {
@@ -507,7 +533,7 @@ func TestPrivateTextFinalizesWithoutReleasingLease(t *testing.T) {
 	if secret != "classified text" || releases != 0 {
 		t.Fatalf("secret/release = %q/%d", secret, releases)
 	}
-	if got := tg.messages[len(tg.messages)-1].Text; !strings.Contains(got, "queued") {
+	if got := tg.messages[len(tg.messages)-1].Text; !strings.Contains(got, "posted shortly") {
 		t.Fatalf("confirmation = %q", got)
 	}
 }
@@ -584,7 +610,7 @@ func TestPrivateMediaDownloadsFinalizesAndZerosBuffer(t *testing.T) {
 			}
 			return telegram.File{FileID: request.FileID, FilePath: "voice/file.ogg", FileSize: int64(len(downloaded))}, nil
 		},
-		downloadFile: func(_ context.Context, path string) ([]byte, error) {
+		downloadFile: func(_ context.Context, path string, _ int64) ([]byte, error) {
 			if path != "voice/file.ogg" {
 				t.Fatalf("DownloadFile path = %q", path)
 			}
@@ -622,7 +648,7 @@ func TestPrivateMediaDownloadFailureReleasesLease(t *testing.T) {
 		getFile: func(context.Context, telegram.GetFileRequest) (telegram.File, error) {
 			return telegram.File{FileID: "photo", FilePath: "photos/file.jpg"}, nil
 		},
-		downloadFile: func(context.Context, string) ([]byte, error) { return nil, wantErr },
+		downloadFile: func(context.Context, string, int64) ([]byte, error) { return nil, wantErr },
 	}
 	update := privateUpdate(101, "")
 	update.Message.Photo = []telegram.PhotoSize{{FileID: "photo", FileUniqueID: "unique"}}

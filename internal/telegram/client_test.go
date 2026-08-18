@@ -348,16 +348,16 @@ func TestDownloadFileEnforcesHeaderAndActualByteLimit(t *testing.T) {
 	defer server.Close()
 	client := mustClient(t, server.URL, 4)
 
-	data, err := client.DownloadFile(context.Background(), "ok/file.bin")
+	data, err := client.DownloadFile(context.Background(), "ok/file.bin", 0)
 	if err != nil || string(data) != "data" {
 		t.Fatalf("DownloadFile(ok) = %q, %v", data, err)
 	}
 	for _, filePath := range []string{"large/header.bin", "large/chunked.bin"} {
-		if _, err := client.DownloadFile(context.Background(), filePath); !errors.Is(err, ErrFileTooLarge) {
+		if _, err := client.DownloadFile(context.Background(), filePath, 0); !errors.Is(err, ErrFileTooLarge) {
 			t.Errorf("DownloadFile(%q) error = %v, want ErrFileTooLarge", filePath, err)
 		}
 	}
-	if _, err := client.DownloadFile(context.Background(), "../token"); !errors.Is(err, ErrInvalidArgument) {
+	if _, err := client.DownloadFile(context.Background(), "../token", 0); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("unsafe path error = %v", err)
 	}
 }
@@ -386,5 +386,128 @@ func writeJSON(t *testing.T, w http.ResponseWriter, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(value); err != nil {
 		t.Errorf("encode response: %v", err)
+	}
+}
+
+func TestGetUpdatesQuarantinesMalformedUpdates(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, map[string]any{
+			"ok": true,
+			"result": []any{
+				map[string]any{
+					"update_id": 10,
+					// message.date is a string instead of an integer: this update
+					// fails to decode but its update_id must still be recoverable.
+					"message": map[string]any{"message_id": 1, "date": "not-a-number", "chat": map[string]any{"id": 1, "type": "private"}},
+				},
+				map[string]any{
+					"update_id": 11,
+					"message":   map[string]any{"message_id": 2, "date": 5, "chat": map[string]any{"id": 1, "type": "private"}, "text": "hello"},
+				},
+				// Not even update_id decodes: dropped entirely.
+				"totally-unexpected",
+			},
+		})
+	}))
+	defer server.Close()
+	client := mustClient(t, server.URL, 1<<20)
+
+	updates, err := client.GetUpdates(context.Background(), GetUpdatesRequest{})
+	if err != nil {
+		t.Fatalf("GetUpdates() error = %v", err)
+	}
+	if len(updates) != 2 {
+		t.Fatalf("GetUpdates() = %+v, want 2 surviving updates", updates)
+	}
+	if updates[0].UpdateID != 10 || updates[0].Message != nil {
+		t.Errorf("malformed update should keep only its ID, got %+v", updates[0])
+	}
+	if updates[1].UpdateID != 11 || updates[1].Message == nil {
+		t.Errorf("healthy update should decode fully, got %+v", updates[1])
+	}
+}
+
+func TestClientRefusesToFollowRedirects(t *testing.T) {
+	t.Parallel()
+
+	var redirectTarget *httptest.Server
+	redirectTarget = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// If the client ever followed the redirect, the secret body would land
+		// here and the test would observe a request.
+		t.Error("client followed a cross-host redirect carrying the request body")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer redirectTarget.Close()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", redirectTarget.URL+"/collect")
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	defer server.Close()
+	client := mustClient(t, server.URL, 1<<20)
+
+	_, err := client.SendMessage(context.Background(), SendMessageRequest{ChatID: 1, Text: "secret"})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("SendMessage() redirect error = %v, want APIError", err)
+	}
+	if apiErr.StatusCode < 300 || apiErr.StatusCode >= 400 {
+		t.Errorf("redirect surfaced as HTTP %d, want a 3xx status", apiErr.StatusCode)
+	}
+}
+
+func TestDownloadFileVerifiesExpectedSize(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("truncated-but-cleanly-closed"))
+	}))
+	defer server.Close()
+	client := mustClient(t, server.URL, 1<<20)
+
+	data, err := client.DownloadFile(context.Background(), "ok/file.bin", 1024)
+	if !errors.Is(err, ErrIncompleteDownload) {
+		t.Fatalf("DownloadFile() = %q, %v; want ErrIncompleteDownload", data, err)
+	}
+	if _, err := client.DownloadFile(context.Background(), "ok/file.bin", int64(len("truncated-but-cleanly-closed"))); err != nil {
+		t.Fatalf("DownloadFile() with matching size error = %v", err)
+	}
+}
+
+func TestAPIErrorPredicates(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		err        *APIError
+		permanent  bool
+		rateLimit  bool
+		retryAfter time.Duration
+	}{
+		{"flood with retry-after", &APIError{ErrorCode: 429, Parameters: &ResponseParameters{RetryAfter: 12}}, false, true, 12 * time.Second},
+		{"proxy html 429", &APIError{StatusCode: 429}, false, true, 0},
+		{"bad request", &APIError{ErrorCode: 400}, true, false, 0},
+		{"unauthorized", &APIError{StatusCode: 401}, true, false, 0},
+		{"server error", &APIError{ErrorCode: 500}, false, false, 0},
+		{"transport style", &APIError{Method: "sendMessage"}, false, false, 0},
+	}
+	for _, tc := range cases {
+		if got := tc.err.Permanent(); got != tc.permanent {
+			t.Errorf("%s: Permanent() = %v, want %v", tc.name, got, tc.permanent)
+		}
+		if got := tc.err.RateLimited(); got != tc.rateLimit {
+			t.Errorf("%s: RateLimited() = %v, want %v", tc.name, got, tc.rateLimit)
+		}
+		if got := tc.err.RetryAfter(); got != tc.retryAfter {
+			t.Errorf("%s: RetryAfter() = %v, want %v", tc.name, got, tc.retryAfter)
+		}
+	}
+	if IsPermanent(&APIError{ErrorCode: 400}) != true || IsRateLimited(&APIError{ErrorCode: 429}) != true {
+		t.Error("package-level predicate helpers misclassified")
+	}
+	if IsPermanent(errors.New("boom")) || IsRateLimited(nil) {
+		t.Error("non-API errors must not classify as permanent or rate-limited")
 	}
 }

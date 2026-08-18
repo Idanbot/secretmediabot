@@ -4,11 +4,26 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"time"
 
+	"github.com/idan/secretmediabot/internal/metrics"
 	"github.com/idan/secretmediabot/internal/repository"
 	"github.com/idan/secretmediabot/internal/telegram"
 )
+
+// Shared delete-job worker constants.
+const (
+	deleteJobDrainLimit   = 50
+	deleteJobLease        = 20 * time.Second
+	deleteJobRequestWait  = 8 * time.Second
+	deleteJobMaxBackoff   = 5 * time.Minute
+	deleteJobMaxAttempts  = 30
+	deleteFinishWriteWait = 3 * time.Second
+)
+
+var deleteJobOutcomes = metrics.Counter(
+	"ephemeral_delete_jobs_total", "Deletion job terminations by kind and outcome.", "kind", "outcome")
 
 type CleanupStore interface {
 	RunCleanup(context.Context, repository.CleanupParams) (repository.CleanupResult, error)
@@ -29,18 +44,21 @@ func NewCleanupWorker(
 	batchSize int,
 	processedUpdateRetention time.Duration,
 	logger *slog.Logger,
-) *CleanupWorker {
+) (*CleanupWorker, error) {
+	if store == nil || interval <= 0 || batchSize <= 0 || processedUpdateRetention <= 0 {
+		return nil, errors.New("cleanup worker requires a store and positive interval, batch size, and retention")
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &CleanupWorker{
 		store: store, interval: interval, batchSize: batchSize,
 		processedUpdateRetention: processedUpdateRetention, logger: logger,
 		now: func() time.Time { return time.Now().UTC() },
-	}
+	}, nil
 }
 
 func (w *CleanupWorker) Run(ctx context.Context) error {
-	if w.logger == nil {
-		w.logger = slog.Default()
-	}
 	if err := w.runOnce(ctx); err != nil && ctx.Err() == nil {
 		w.logger.ErrorContext(ctx, "initial cleanup failed")
 	}
@@ -96,6 +114,37 @@ type EphemeralDeleteWorker struct {
 	now      func() time.Time
 }
 
+func NewEphemeralDeleteWorker(
+	store EphemeralDeleteStore,
+	telegramClient EphemeralDeleter,
+	interval time.Duration,
+	logger *slog.Logger,
+) (*EphemeralDeleteWorker, error) {
+	if store == nil || telegramClient == nil || interval <= 0 {
+		return nil, errors.New("ephemeral delete worker requires a store, deleter, and positive interval")
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &EphemeralDeleteWorker{
+		store: store, telegram: telegramClient, interval: interval, logger: logger,
+		now: func() time.Time { return time.Now().UTC() },
+	}, nil
+}
+
+func (w *EphemeralDeleteWorker) Run(ctx context.Context) error {
+	ticker := time.NewTicker(w.interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			drainDeleteJobs(ctx, w.logger, "ephemeral", &ephemeralJobQueue{store: w.store, deleter: w.telegram}, w.now)
+		}
+	}
+}
+
 type GuestPrivateDeleteStore interface {
 	ClaimDueGuestDelete(context.Context, repository.ClaimGuestDeleteParams) (repository.GuestPrivateDeleteJob, error)
 	MarkGuestDeleted(context.Context, repository.FinishGuestDeleteParams) error
@@ -114,17 +163,20 @@ type GuestPrivateDeleteWorker struct {
 	now      func() time.Time
 }
 
-func NewGuestPrivateDeleteWorker(store GuestPrivateDeleteStore, telegramClient GuestPrivateDeleter, interval time.Duration, logger *slog.Logger) *GuestPrivateDeleteWorker {
+func NewGuestPrivateDeleteWorker(store GuestPrivateDeleteStore, telegramClient GuestPrivateDeleter, interval time.Duration, logger *slog.Logger) (*GuestPrivateDeleteWorker, error) {
+	if store == nil || telegramClient == nil || interval <= 0 {
+		return nil, errors.New("guest delete worker requires a store, deleter, and positive interval")
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &GuestPrivateDeleteWorker{
 		store: store, telegram: telegramClient, interval: interval, logger: logger,
 		now: func() time.Time { return time.Now().UTC() },
-	}
+	}, nil
 }
 
 func (w *GuestPrivateDeleteWorker) Run(ctx context.Context) error {
-	if w.logger == nil {
-		w.logger = slog.Default()
-	}
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
 	for {
@@ -132,110 +184,172 @@ func (w *GuestPrivateDeleteWorker) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			for range 50 {
-				didWork, err := w.deleteOne(ctx)
-				if err != nil && ctx.Err() == nil {
-					w.logger.ErrorContext(ctx, "guest private deletion worker failed")
-					break
-				}
-				if !didWork {
-					break
-				}
-			}
+			drainDeleteJobs(ctx, w.logger, "guest_private", &guestJobQueue{store: w.store, deleter: w.telegram}, w.now)
 		}
 	}
 }
 
-func (w *GuestPrivateDeleteWorker) deleteOne(ctx context.Context) (bool, error) {
-	now := w.now()
-	job, err := w.store.ClaimDueGuestDelete(ctx, repository.ClaimGuestDeleteParams{Now: now, LeaseUntil: now.Add(20 * time.Second)})
-	if errors.Is(err, repository.ErrNotFound) {
-		return false, nil
-	}
+// deleteJob is the shared shape of both durable deletion queues.
+type deleteJob struct {
+	id           int64
+	chatID       int64
+	messageID    int64
+	receiverID   int64
+	attemptCount int
+	leaseUntil   time.Time
+}
+
+// deleteJobQueue abstracts one durable deletion queue: claim a due job,
+// attempt the Telegram deletion, and record the outcome.
+type deleteJobQueue interface {
+	claim(context.Context, time.Time, time.Time) (deleteJob, error)
+	delete(context.Context, deleteJob) error
+	markDeleted(context.Context, deleteJob, time.Time, string) error
+	retry(context.Context, deleteJob, time.Time, time.Time, string) error
+}
+
+type ephemeralJobQueue struct {
+	store   EphemeralDeleteStore
+	deleter EphemeralDeleter
+}
+
+func (q *ephemeralJobQueue) claim(ctx context.Context, now, leaseUntil time.Time) (deleteJob, error) {
+	job, err := q.store.ClaimDueEphemeralDelete(ctx, repository.ClaimEphemeralDeleteParams{Now: now, LeaseUntil: leaseUntil})
 	if err != nil {
-		return false, err
+		return deleteJob{}, err
 	}
-	requestCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	err = w.telegram.DeleteMessage(requestCtx, telegram.DeleteMessageRequest{ChatID: job.ChatID, MessageID: job.MessageID})
-	cancel()
-	finish := repository.FinishGuestDeleteParams{JobID: job.ID, ExpectedLeaseUntil: job.LeaseUntil, Now: w.now()}
-	if err == nil || permanentDeleteError(err) {
-		return true, w.store.MarkGuestDeleted(ctx, finish)
-	}
-	finish.NextAttemptAt = finish.Now.Add(min(time.Duration(1<<min(job.AttemptCount, 8))*time.Second, 5*time.Minute))
-	finish.ErrorCode = "telegram_delete_failed"
-	return true, w.store.RetryGuestDelete(ctx, finish)
+	return deleteJob{
+		id: job.ID, chatID: job.ChatID, receiverID: job.RecipientID,
+		messageID: job.EphemeralMessageID, attemptCount: job.AttemptCount, leaseUntil: job.LeaseUntil,
+	}, nil
 }
 
-func NewEphemeralDeleteWorker(
-	store EphemeralDeleteStore,
-	telegramClient EphemeralDeleter,
-	interval time.Duration,
-	logger *slog.Logger,
-) *EphemeralDeleteWorker {
-	return &EphemeralDeleteWorker{
-		store: store, telegram: telegramClient, interval: interval, logger: logger,
-		now: func() time.Time { return time.Now().UTC() },
-	}
+func (q *ephemeralJobQueue) delete(ctx context.Context, job deleteJob) error {
+	return q.deleter.DeleteEphemeralMessage(ctx, telegram.DeleteEphemeralMessageRequest{
+		ChatID: job.chatID, ReceiverUserID: job.receiverID, EphemeralMessageID: job.messageID,
+	})
 }
 
-func (w *EphemeralDeleteWorker) Run(ctx context.Context) error {
-	if w.logger == nil {
-		w.logger = slog.Default()
+func (q *ephemeralJobQueue) markDeleted(ctx context.Context, job deleteJob, now time.Time, code string) error {
+	return q.store.MarkEphemeralDeleted(ctx, repository.FinishEphemeralDeleteParams{
+		JobID: job.id, ExpectedLeaseUntil: job.leaseUntil, Now: now, ErrorCode: code,
+	})
+}
+
+func (q *ephemeralJobQueue) retry(ctx context.Context, job deleteJob, now, next time.Time, code string) error {
+	return q.store.RetryEphemeralDelete(ctx, repository.FinishEphemeralDeleteParams{
+		JobID: job.id, ExpectedLeaseUntil: job.leaseUntil, Now: now, NextAttemptAt: next, ErrorCode: code,
+	})
+}
+
+type guestJobQueue struct {
+	store   GuestPrivateDeleteStore
+	deleter GuestPrivateDeleter
+}
+
+func (q *guestJobQueue) claim(ctx context.Context, now, leaseUntil time.Time) (deleteJob, error) {
+	job, err := q.store.ClaimDueGuestDelete(ctx, repository.ClaimGuestDeleteParams{Now: now, LeaseUntil: leaseUntil})
+	if err != nil {
+		return deleteJob{}, err
 	}
-	ticker := time.NewTicker(w.interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-ticker.C:
-			for range 50 {
-				didWork, err := w.deleteOne(ctx)
-				if err != nil && ctx.Err() == nil {
-					w.logger.ErrorContext(ctx, "ephemeral deletion worker failed")
-					break
-				}
-				if !didWork {
-					break
-				}
+	return deleteJob{
+		id: job.ID, chatID: job.ChatID, messageID: job.MessageID,
+		attemptCount: job.AttemptCount, leaseUntil: job.LeaseUntil,
+	}, nil
+}
+
+func (q *guestJobQueue) delete(ctx context.Context, job deleteJob) error {
+	return q.deleter.DeleteMessage(ctx, telegram.DeleteMessageRequest{
+		ChatID: job.chatID, MessageID: job.messageID,
+	})
+}
+
+func (q *guestJobQueue) markDeleted(ctx context.Context, job deleteJob, now time.Time, code string) error {
+	return q.store.MarkGuestDeleted(ctx, repository.FinishGuestDeleteParams{
+		JobID: job.id, ExpectedLeaseUntil: job.leaseUntil, Now: now, ErrorCode: code,
+	})
+}
+
+func (q *guestJobQueue) retry(ctx context.Context, job deleteJob, now, next time.Time, code string) error {
+	return q.store.RetryGuestDelete(ctx, repository.FinishGuestDeleteParams{
+		JobID: job.id, ExpectedLeaseUntil: job.leaseUntil, Now: now, NextAttemptAt: next, ErrorCode: code,
+	})
+}
+
+// drainDeleteJobs claims and executes deletion jobs until the queue is empty
+// or the bounded drain budget is spent.
+func drainDeleteJobs(ctx context.Context, logger *slog.Logger, kind string, queue deleteJobQueue, now func() time.Time) {
+	for range deleteJobDrainLimit {
+		if ctx.Err() != nil {
+			return
+		}
+		current := now()
+		job, err := queue.claim(ctx, current, current.Add(deleteJobLease))
+		if errors.Is(err, repository.ErrNotFound) {
+			return
+		}
+		if err != nil {
+			if ctx.Err() == nil {
+				logger.ErrorContext(ctx, "deletion worker failed to claim a job", "kind", kind)
 			}
+			return
+		}
+		if err := executeDeleteJob(ctx, kind, queue, job, now); err != nil && ctx.Err() == nil {
+			logger.ErrorContext(ctx, "deletion worker failed", "kind", kind)
 		}
 	}
 }
 
-func (w *EphemeralDeleteWorker) deleteOne(ctx context.Context) (bool, error) {
-	now := w.now()
-	leaseUntil := now.Add(20 * time.Second)
-	job, err := w.store.ClaimDueEphemeralDelete(ctx, repository.ClaimEphemeralDeleteParams{
-		Now: now, LeaseUntil: leaseUntil,
-	})
-	if errors.Is(err, repository.ErrNotFound) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-
-	requestCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	err = w.telegram.DeleteEphemeralMessage(requestCtx, telegram.DeleteEphemeralMessageRequest{
-		ChatID: job.ChatID, ReceiverUserID: job.RecipientID, EphemeralMessageID: job.EphemeralMessageID,
-	})
+func executeDeleteJob(ctx context.Context, kind string, queue deleteJobQueue, job deleteJob, now func() time.Time) error {
+	requestCtx, cancel := context.WithTimeout(ctx, deleteJobRequestWait)
+	err := queue.delete(requestCtx, job)
 	cancel()
-	finish := repository.FinishEphemeralDeleteParams{
-		JobID: job.ID, ExpectedLeaseUntil: job.LeaseUntil, Now: w.now(),
-	}
-	if err == nil || permanentDeleteError(err) {
-		return true, w.store.MarkEphemeralDeleted(ctx, finish)
-	}
 
-	retry := min(time.Duration(1<<min(job.AttemptCount, 8))*time.Second, 5*time.Minute)
-	finish.NextAttemptAt = finish.Now.Add(retry)
-	finish.ErrorCode = "telegram_delete_failed"
-	return true, w.store.RetryEphemeralDelete(ctx, finish)
+	// Finish writes deliberately use a detached context: a Telegram deletion
+	// that already succeeded must be recorded even if shutdown started.
+	finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), deleteFinishWriteWait)
+	defer finishCancel()
+	finishNow := now()
+
+	switch {
+	case err == nil:
+		deleteJobOutcomes.Inc(kind, "deleted")
+		return queue.markDeleted(finishCtx, job, finishNow, "")
+	case permanentDeleteClose(err):
+		// The message is gone, the bot lost access, or Telegram permanently
+		// refuses the call: stop retrying and record why the job closed.
+		deleteJobOutcomes.Inc(kind, "permanent")
+		return queue.markDeleted(finishCtx, job, finishNow, "telegram_permanent")
+	case job.attemptCount >= deleteJobMaxAttempts:
+		// Bounded retry: an unremovable message must not occupy the queue (and
+		// the table) forever.
+		deleteJobOutcomes.Inc(kind, "gave_up")
+		return queue.markDeleted(finishCtx, job, finishNow, "gave_up")
+	default:
+		backoff := min(time.Duration(1<<min(job.attemptCount, 8))*time.Second, deleteJobMaxBackoff)
+		var apiErr *telegram.APIError
+		if errors.As(err, &apiErr) {
+			if requested := apiErr.RetryAfter(); requested > backoff {
+				backoff = requested
+			}
+		}
+		deleteJobOutcomes.Inc(kind, "retry")
+		return queue.retry(finishCtx, job, finishNow, finishNow.Add(backoff), "telegram_delete_failed")
+	}
 }
 
-func permanentDeleteError(err error) bool {
-	var apiErr *telegram.APIError
-	return errors.As(err, &apiErr) && apiErr.ErrorCode >= 400 && apiErr.ErrorCode < 500 && apiErr.ErrorCode != 429
+// permanentDeleteClose narrows "stop retrying" to the Telegram responses that
+// genuinely mean the target message can never be deleted this way. A generic
+// 400 may be our own request shape changing and is retried until the attempt
+// cap closes the job as gave_up.
+func permanentDeleteClose(err error) bool {
+	apiErr := (*telegram.APIError)(nil)
+	if !errors.As(err, &apiErr) || apiErr.RateLimited() {
+		return false
+	}
+	if apiErr.ErrorCode == 403 || apiErr.ErrorCode == 404 || apiErr.StatusCode == 403 || apiErr.StatusCode == 404 {
+		return true
+	}
+	description := strings.ToLower(apiErr.Description)
+	return strings.Contains(description, "message to delete not found")
 }

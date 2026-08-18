@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/idan/secretmediabot/internal/domain"
 	"github.com/idan/secretmediabot/internal/repository"
 	"github.com/idan/secretmediabot/internal/secretcrypto"
@@ -44,6 +45,7 @@ type Store interface {
 	OwnerFetchEncryptedContent(context.Context, repository.OwnerGetWhisperParams) (repository.StoredContent, error)
 	OwnerDeleteWhisper(context.Context, repository.OwnerDeleteWhisperParams) error
 	OwnerUpdateRetention(context.Context, repository.OwnerUpdateRetentionParams) error
+	FetchWhisperMedia(context.Context, uuid.UUID) (repository.WhisperMediaBlob, error)
 }
 
 type Options struct {
@@ -57,10 +59,17 @@ type Options struct {
 	MaxMediaBytes             int64
 	MaxActiveDraftsPerUser    int
 	MaxWhispersPerUserPerHour int
-	DefaultOneTime            bool
-	ProtectContent            bool
-	AllowedChatIDs            []int64
-	OwnerIDs                  []int64
+	// MaxActiveGuestRequestsPerUser and MaxGuestRequestsPerUserPerHour bound
+	// guest/inline request creation; both must be positive.
+	MaxActiveGuestRequestsPerUser  int
+	MaxGuestRequestsPerUserPerHour int
+	DefaultOneTime                 bool
+	ProtectContent                 bool
+	AllowedChatIDs                 []int64
+	OwnerIDs                       []int64
+	// GuestModeEnabled toggles guest mentions and inline locked envelopes.
+	// When false, guest request creation fails closed.
+	GuestModeEnabled bool
 }
 
 type Service struct {
@@ -80,7 +89,8 @@ func New(store Store, cipher *secretcrypto.Keyring, options Options) (*Service, 
 	if options.DraftTTL <= 0 || options.WhisperTTL <= 0 || options.ContentRetention <= 0 ||
 		options.IngestLease <= 0 || options.OpenLease <= 0 || options.PublishLease <= 0 ||
 		options.EphemeralDeleteAfter <= 0 || options.MaxMediaBytes <= 0 ||
-		options.MaxActiveDraftsPerUser <= 0 || options.MaxWhispersPerUserPerHour <= 0 {
+		options.MaxActiveDraftsPerUser <= 0 || options.MaxWhispersPerUserPerHour <= 0 ||
+		options.MaxActiveGuestRequestsPerUser <= 0 || options.MaxGuestRequestsPerUserPerHour <= 0 {
 		return nil, errors.New("service durations and limits must be positive")
 	}
 	allowed := make(map[int64]struct{}, len(options.AllowedChatIDs))

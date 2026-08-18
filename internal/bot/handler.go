@@ -33,6 +33,8 @@ type useCases interface {
 	ReserveOpen(context.Context, string, int64, string) (service.OpenDelivery, error)
 	CompleteOpen(context.Context, service.OpenDelivery, int64) error
 	FailOpen(context.Context, service.OpenDelivery, string) error
+	WhisperMediaFallback(context.Context, uuid.UUID) ([]byte, domain.MediaType, string, error)
+	HasActiveDraft(context.Context, int64) (bool, error)
 	IsOwner(int64) bool
 	OwnerList(context.Context, int64, int, int) ([]domain.Whisper, error)
 	OwnerReview(context.Context, int64, uuid.UUID) (service.OwnerReview, error)
@@ -43,7 +45,7 @@ type useCases interface {
 type guestUseCases interface {
 	CreateGuestRequest(context.Context, service.CreateGuestRequestParams) (service.GuestSession, error)
 	MarkGuestEnvelope(context.Context, string, string) error
-	CancelGuestRequest(context.Context, int64) error
+	CancelGuestRequest(context.Context, int64) (int, error)
 	BeginGuestSession(context.Context, string, domain.User) (service.GuestSession, error)
 	ClaimGuestIngestForSender(context.Context, int64) (service.GuestIngestClaim, error)
 	ReleaseGuestIngest(context.Context, service.GuestIngestClaim) error
@@ -52,6 +54,7 @@ type guestUseCases interface {
 	ReserveGuestOpen(context.Context, string, domain.User) (service.GuestDelivery, error)
 	CompleteGuestOpen(context.Context, service.GuestDelivery, int64) error
 	FailGuestOpen(context.Context, service.GuestDelivery) error
+	GuestMediaFallback(context.Context, uuid.UUID) ([]byte, domain.MediaType, string, error)
 }
 
 type telegramAPI interface {
@@ -60,9 +63,10 @@ type telegramAPI interface {
 	AnswerGuestQuery(context.Context, telegram.AnswerGuestQueryRequest) (telegram.SentGuestMessage, error)
 	AnswerInlineQuery(context.Context, telegram.AnswerInlineQueryRequest) error
 	GetFile(context.Context, telegram.GetFileRequest) (telegram.File, error)
-	DownloadFile(context.Context, string) ([]byte, error)
+	DownloadFile(context.Context, string, int64) ([]byte, error)
 	SendEphemeralText(context.Context, telegram.SendEphemeralTextRequest) (int64, error)
 	SendEphemeralMedia(context.Context, telegram.SendEphemeralMediaRequest) (int64, error)
+	SendEphemeralMediaUpload(context.Context, telegram.SendEphemeralMediaUploadRequest) (int64, error)
 	SendPrivateMediaByFileID(context.Context, telegram.SendPrivateMediaByFileIDRequest) (telegram.Message, error)
 	SendPrivateMedia(context.Context, telegram.SendPrivateMediaRequest) (telegram.Message, error)
 	DeleteMessage(context.Context, telegram.DeleteMessageRequest) error

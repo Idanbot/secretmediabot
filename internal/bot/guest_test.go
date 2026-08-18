@@ -41,8 +41,8 @@ func (f *fakeGuestUseCases) MarkGuestEnvelope(ctx context.Context, parameter, in
 	return nil
 }
 
-func (f *fakeGuestUseCases) CancelGuestRequest(context.Context, int64) error {
-	return service.ErrGuestNotFound
+func (f *fakeGuestUseCases) CancelGuestRequest(context.Context, int64) (int, error) {
+	return 0, service.ErrGuestNotFound
 }
 
 func (f *fakeGuestUseCases) BeginGuestSession(ctx context.Context, parameter string, user domain.User) (service.GuestSession, error) {
@@ -84,6 +84,10 @@ func (f *fakeGuestUseCases) CompleteGuestOpen(ctx context.Context, delivery serv
 }
 
 func (f *fakeGuestUseCases) FailGuestOpen(context.Context, service.GuestDelivery) error { return nil }
+
+func (f *fakeGuestUseCases) GuestMediaFallback(context.Context, uuid.UUID) ([]byte, domain.MediaType, string, error) {
+	return nil, "", "", service.ErrGuestNotFound
+}
 
 func TestParseGuestTargetSupportsIDsAndUsernames(t *testing.T) {
 	tests := []struct {

@@ -7,6 +7,7 @@ This directory holds the design and implementation documentation for Secret Medi
 | [README](../README.md) | Everyone | What the bot does, quickstart, configuration, commands, development, CI/CD, caveats. |
 | [architecture.md](architecture.md) | Developers and reviewers | Component boundaries, data model, state machines and concurrency, retention and deletion, privacy and threat model, deployment posture. |
 | [telegram-media-whisper-v1.md](telegram-media-whisper-v1.md) | Reviewers | The original V1 build specification this implementation was written against. |
+| [improvements.md](improvements.md) | Maintainers | Prioritized top-25 improvement backlog from the full-project review (P0/P1/P2 with file-level evidence). |
 
 Suggested reading order for a new developer or reviewer:
 

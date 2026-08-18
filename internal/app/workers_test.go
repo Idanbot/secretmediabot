@@ -63,13 +63,16 @@ func TestCleanupWorkerFailureLogIsRedacted(t *testing.T) {
 		return repository.CleanupResult{}, nil
 	})
 	var logs bytes.Buffer
-	worker := NewCleanupWorker(
+	worker, workerErr := NewCleanupWorker(
 		store,
 		time.Millisecond,
 		1,
 		time.Hour,
 		slog.New(slog.NewTextHandler(&logs, nil)),
 	)
+	if workerErr != nil {
+		t.Fatalf("NewCleanupWorker() error = %v", workerErr)
+	}
 
 	if err := worker.Run(ctx); err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -102,18 +105,21 @@ func TestEphemeralDeleteWorkerFailureLogIsRedacted(t *testing.T) {
 		return repository.EphemeralDeleteJob{}, repository.ErrNotFound
 	}}
 	var logs bytes.Buffer
-	worker := NewEphemeralDeleteWorker(
+	worker, workerErr := NewEphemeralDeleteWorker(
 		store,
 		ephemeralDeleterFunc(func(context.Context, telegram.DeleteEphemeralMessageRequest) error { return nil }),
 		time.Millisecond,
 		slog.New(slog.NewTextHandler(&logs, nil)),
 	)
+	if workerErr != nil {
+		t.Fatalf("NewEphemeralDeleteWorker() error = %v", workerErr)
+	}
 
 	if err := worker.Run(ctx); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 	output := logs.String()
-	if !strings.Contains(output, "ephemeral deletion worker failed") {
+	if !strings.Contains(output, "deletion worker failed") {
 		t.Fatalf("ephemeral deletion log = %q, want generic failure", output)
 	}
 	if strings.Contains(output, sensitive) || strings.Contains(output, "987654") {

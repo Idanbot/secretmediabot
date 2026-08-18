@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -37,6 +38,17 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// A second signal during graceful shutdown forces an immediate exit so a
+	// stuck shutdown never wedges the container past its stop grace period.
+	forceExit := make(chan os.Signal, 1)
+	signal.Notify(forceExit, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(forceExit)
+	go func() {
+		<-ctx.Done()
+		<-forceExit
+		slog.Warn("second shutdown signal received; exiting immediately")
+		os.Exit(130)
+	}()
 
 	if err := run(ctx); err != nil {
 		slog.Error("bot stopped", "err", err)
@@ -45,14 +57,36 @@ func main() {
 }
 
 func healthcheck() error {
+	// Honor a custom HTTP bind. The container healthcheck probes liveness
+	// (/healthz), not readiness: a transient database outage must not restart
+	// a process whose workers are designed to ride it out.
+	addr := strings.TrimSpace(os.Getenv("HTTP_ADDR"))
+	host := "127.0.0.1"
+	switch {
+	case addr == "":
+		addr = ":8080"
+	case strings.HasPrefix(addr, ":"):
+		// port-only bind; probe loopback
+	case strings.Contains(addr, ":"):
+		bindHost, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return fmt.Errorf("parse HTTP_ADDR %q: %w", addr, err)
+		}
+		addr = ":" + port
+		if bindHost != "" && bindHost != "0.0.0.0" && bindHost != "::" {
+			host = bindHost
+		}
+	default:
+		return fmt.Errorf("HTTP_ADDR %q is not host:port", addr)
+	}
 	client := http.Client{Timeout: 4 * time.Second}
-	response, err := client.Get("http://127.0.0.1:8080/readyz")
+	response, err := client.Get("http://" + net.JoinHostPort(host, strings.TrimPrefix(addr, ":")) + "/healthz")
 	if err != nil {
 		return err
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("readiness endpoint returned HTTP %d", response.StatusCode)
+		return fmt.Errorf("health endpoint returned HTTP %d", response.StatusCode)
 	}
 	return nil
 }
@@ -64,6 +98,9 @@ func run(parent context.Context) error {
 	}
 	logger := newLogger(cfg.AppEnv, cfg.LogLevel)
 	slog.SetDefault(logger)
+	for _, warning := range cfg.Warnings {
+		logger.Warn("configuration warning", "detail", warning)
+	}
 
 	connectCtx, cancelConnect := context.WithTimeout(parent, cfg.Database.ConnectTimeout)
 	database, err := repository.Open(connectCtx, repository.DatabaseOptions{
@@ -79,7 +116,7 @@ func run(parent context.Context) error {
 	}
 	defer func() { _ = database.Close() }()
 
-	migrateCtx, cancelMigrate := context.WithTimeout(parent, 2*time.Minute)
+	migrateCtx, cancelMigrate := context.WithTimeout(parent, 10*time.Minute)
 	err = database.Migrate(migrateCtx)
 	cancelMigrate()
 	if err != nil {
@@ -142,20 +179,23 @@ func run(parent context.Context) error {
 
 	store := repository.NewStore(database)
 	useCases, err := service.New(store, keyring, service.Options{
-		DraftTTL:                  cfg.Whisper.DraftTTL,
-		WhisperTTL:                cfg.Whisper.DefaultTTL,
-		ContentRetention:          cfg.Media.Retention,
-		IngestLease:               cfg.Media.DownloadTimeout + cfg.Telegram.RequestTimeout + 30*time.Second,
-		OpenLease:                 telegram.EphemeralCallbackWindow + 5*time.Second,
-		PublishLease:              cfg.Whisper.PublishLeaseTimeout,
-		EphemeralDeleteAfter:      cfg.Whisper.EphemeralDeleteAfter,
-		MaxMediaBytes:             cfg.Media.MaxBytes,
-		MaxActiveDraftsPerUser:    cfg.Whisper.MaxActiveDraftsPerUser,
-		MaxWhispersPerUserPerHour: cfg.Whisper.MaxWhispersPerUserPerHour,
-		DefaultOneTime:            cfg.Whisper.DefaultOneTime,
-		ProtectContent:            cfg.Whisper.ProtectContent,
-		AllowedChatIDs:            cfg.Whisper.AllowedChatIDs,
-		OwnerIDs:                  cfg.Telegram.OwnerIDs,
+		DraftTTL:                       cfg.Whisper.DraftTTL,
+		WhisperTTL:                     cfg.Whisper.DefaultTTL,
+		ContentRetention:               cfg.Media.Retention,
+		IngestLease:                    cfg.Media.DownloadTimeout + cfg.Telegram.RequestTimeout + 30*time.Second,
+		OpenLease:                      telegram.EphemeralCallbackWindow + 5*time.Second,
+		PublishLease:                   cfg.Whisper.PublishLeaseTimeout,
+		EphemeralDeleteAfter:           cfg.Whisper.EphemeralDeleteAfter,
+		MaxMediaBytes:                  cfg.Media.MaxBytes,
+		MaxActiveDraftsPerUser:         cfg.Whisper.MaxActiveDraftsPerUser,
+		MaxWhispersPerUserPerHour:      cfg.Whisper.MaxWhispersPerUserPerHour,
+		MaxActiveGuestRequestsPerUser:  cfg.Whisper.MaxActiveGuestRequestsPerUser,
+		MaxGuestRequestsPerUserPerHour: cfg.Whisper.MaxGuestRequestsPerUserPerHour,
+		DefaultOneTime:                 cfg.Whisper.DefaultOneTime,
+		ProtectContent:                 cfg.Whisper.ProtectContent,
+		AllowedChatIDs:                 cfg.Whisper.AllowedChatIDs,
+		OwnerIDs:                       cfg.Telegram.OwnerIDs,
+		GuestModeEnabled:               cfg.Telegram.GuestModeEnabled,
 	})
 	if err != nil {
 		return fmt.Errorf("initialize service: %w", err)
@@ -170,7 +210,9 @@ func run(parent context.Context) error {
 		return fmt.Errorf("initialize Telegram handler: %w", err)
 	}
 	updateLease := maxDuration(3*time.Minute, cfg.Media.DownloadTimeout+3*cfg.Telegram.RequestTimeout+30*time.Second)
-	processor, err := app.NewUpdateProcessor(store, handler, updateLease)
+	processor, err := app.NewUpdateProcessor(store, handler, updateLease, app.ProcessorOptions{
+		Logger: logger,
+	})
 	if err != nil {
 		return fmt.Errorf("initialize update processor: %w", err)
 	}
@@ -185,11 +227,20 @@ func run(parent context.Context) error {
 		IdleTimeout: cfg.HTTP.IdleTimeout, WebhookEnabled: cfg.Telegram.UpdateMode == config.UpdateModeWebhook,
 		WebhookSecret: cfg.Telegram.WebhookSecret,
 	}, database, processor, logger)
-	cleanup := app.NewCleanupWorker(
+	cleanup, err := app.NewCleanupWorker(
 		store, cfg.Cleanup.Interval, cfg.Cleanup.BatchSize, cfg.Cleanup.ProcessedUpdateRetention, logger,
 	)
-	deleter := app.NewEphemeralDeleteWorker(store, telegramClient, cfg.Whisper.EphemeralDeleteInterval, logger)
-	guestDeleter := app.NewGuestPrivateDeleteWorker(store, telegramClient, cfg.Whisper.EphemeralDeleteInterval, logger)
+	if err != nil {
+		return fmt.Errorf("initialize cleanup worker: %w", err)
+	}
+	deleter, err := app.NewEphemeralDeleteWorker(store, telegramClient, cfg.Whisper.EphemeralDeleteInterval, logger)
+	if err != nil {
+		return fmt.Errorf("initialize ephemeral deletion worker: %w", err)
+	}
+	guestDeleter, err := app.NewGuestPrivateDeleteWorker(store, telegramClient, cfg.Whisper.EphemeralDeleteInterval, logger)
+	if err != nil {
+		return fmt.Errorf("initialize guest deletion worker: %w", err)
+	}
 	publisher, err := app.NewPublicationWorkerWithTimeout(
 		handler,
 		cfg.Whisper.PublishInterval,
@@ -206,30 +257,38 @@ func run(parent context.Context) error {
 		name string
 		err  error
 	}
-	results := make(chan runnerResult, 6)
-	var runners sync.WaitGroup
-	start := func(name string, fn func(context.Context) error) {
-		runners.Add(1)
-		go func() {
-			defer runners.Done()
-			results <- runnerResult{name: name, err: fn(runCtx)}
-		}()
-	}
-
-	start("http server", func(context.Context) error { return server.ListenAndServe() })
-	start("cleanup worker", cleanup.Run)
-	start("ephemeral deletion worker", deleter.Run)
-	start("guest private deletion worker", guestDeleter.Run)
-	start("publication worker", publisher.Run)
+	runnersList := make([]func(context.Context) error, 0, 6)
+	runnersList = append(runnersList,
+		func(context.Context) error { return server.ListenAndServe() },
+		cleanup.Run,
+		deleter.Run,
+		guestDeleter.Run,
+		publisher.Run,
+	)
 	if cfg.Telegram.UpdateMode == config.UpdateModePolling {
-		poller := app.NewPoller(
+		poller, err := app.NewPoller(
 			telegramClient,
 			processor,
 			cfg.Telegram.PollTimeout,
 			cfg.Telegram.RequestTimeout,
 			logger,
 		)
-		start("Telegram poller", poller.Run)
+		if err != nil {
+			return fmt.Errorf("initialize Telegram poller: %w", err)
+		}
+		runnersList = append(runnersList, poller.Run)
+	}
+	runnerNames := []string{"http server", "cleanup worker", "ephemeral deletion worker",
+		"guest private deletion worker", "publication worker", "Telegram poller"}
+	results := make(chan runnerResult, len(runnersList))
+	var runners sync.WaitGroup
+	for index, runner := range runnersList {
+		name := runnerNames[index]
+		runners.Add(1)
+		go func() {
+			defer runners.Done()
+			results <- runnerResult{name: name, err: runner(runCtx)}
+		}()
 	}
 
 	logger.Info("bot started", "version", version, "commit", commit, "update_mode", cfg.Telegram.UpdateMode)

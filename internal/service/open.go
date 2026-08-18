@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/google/uuid"
 	"github.com/idan/secretmediabot/internal/domain"
 	"github.com/idan/secretmediabot/internal/repository"
 	"github.com/idan/secretmediabot/internal/secretcrypto"
@@ -96,6 +97,21 @@ func (s *Service) FailOpen(ctx context.Context, delivery OpenDelivery, errorCode
 	})
 }
 
+// WhisperMediaFallback decrypts the retained media blob for a whisper whose
+// stored Telegram file_id can no longer be resent. The caller must zero the
+// returned buffer after use.
+func (s *Service) WhisperMediaFallback(ctx context.Context, whisperID uuid.UUID) ([]byte, domain.MediaType, string, error) {
+	blob, err := s.store.FetchWhisperMedia(ctx, whisperID)
+	if err != nil {
+		return nil, "", "", mapRepositoryError(err)
+	}
+	plaintext, err := s.decryptStored(secretcrypto.PurposeMedia, blob.WhisperID, blob.Stored)
+	if err != nil {
+		return nil, "", "", err
+	}
+	return plaintext, blob.MediaType, blob.ContentType, nil
+}
+
 func (s *Service) failOpen(
 	ctx context.Context,
 	reservation repository.OpenReservation,
@@ -118,6 +134,8 @@ func mapOpenError(err error) error {
 		return ErrWhisperExpired
 	case errors.Is(err, repository.ErrAlreadyOpened):
 		return ErrWhisperAlreadyOpened
+	case errors.Is(err, repository.ErrOpenAmbiguous):
+		return ErrWhisperUnavailable
 	case errors.Is(err, repository.ErrNotActive), errors.Is(err, repository.ErrConflict):
 		return ErrWhisperUnavailable
 	default:

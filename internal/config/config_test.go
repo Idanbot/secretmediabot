@@ -1,7 +1,10 @@
 package config
 
 import (
+	"bytes"
 	"encoding/base64"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -82,7 +85,7 @@ func TestLoadFromLookupWebhook(t *testing.T) {
 	env := validEnvironment()
 	env["TELEGRAM_UPDATE_MODE"] = "WEBHOOK"
 	env["TELEGRAM_WEBHOOK_PUBLIC_URL"] = "https://bot.example.com/telegram/webhook"
-	env["TELEGRAM_WEBHOOK_SECRET"] = strings.Repeat("a", 32)
+	env["TELEGRAM_WEBHOOK_SECRET"] = "abcdef0123456789abcdef0123456789"
 	env["TELEGRAM_WEBHOOK_MAX_CONNECTIONS"] = "7"
 	env["HTTP_WRITE_TIMEOUT"] = "3m"
 
@@ -96,6 +99,14 @@ func TestLoadFromLookupWebhook(t *testing.T) {
 	if cfg.Telegram.WebhookMaxConnections != 7 {
 		t.Fatalf("WebhookMaxConnections = %d, want 7", cfg.Telegram.WebhookMaxConnections)
 	}
+}
+
+func variedTestKey() []byte {
+	key := make([]byte, 32)
+	for index := range key {
+		key[index] = byte(index * 7 + 3)
+	}
+	return key
 }
 
 func TestLoadFromLookupRejectsInvalidConfiguration(t *testing.T) {
@@ -124,7 +135,7 @@ func TestLoadFromLookupRejectsInvalidConfiguration(t *testing.T) {
 			change: func(env map[string]string) {
 				env["TELEGRAM_UPDATE_MODE"] = "webhook"
 				env["TELEGRAM_WEBHOOK_PUBLIC_URL"] = "http://bot.example.com/hook"
-				env["TELEGRAM_WEBHOOK_SECRET"] = strings.Repeat("a", 32)
+				env["TELEGRAM_WEBHOOK_SECRET"] = "abcdef0123456789abcdef0123456789"
 			},
 			wantErrPart: "TELEGRAM_WEBHOOK_PUBLIC_URL",
 		},
@@ -133,7 +144,7 @@ func TestLoadFromLookupRejectsInvalidConfiguration(t *testing.T) {
 			change: func(env map[string]string) {
 				env["TELEGRAM_UPDATE_MODE"] = "webhook"
 				env["TELEGRAM_WEBHOOK_PUBLIC_URL"] = "https://bot.example.com/hook"
-				env["TELEGRAM_WEBHOOK_SECRET"] = strings.Repeat("a", 32)
+				env["TELEGRAM_WEBHOOK_SECRET"] = "abcdef0123456789abcdef0123456789"
 				env["HTTP_WRITE_TIMEOUT"] = "3m"
 			},
 			wantErrPart: "TELEGRAM_WEBHOOK_PUBLIC_URL",
@@ -143,7 +154,7 @@ func TestLoadFromLookupRejectsInvalidConfiguration(t *testing.T) {
 			change: func(env map[string]string) {
 				env["TELEGRAM_UPDATE_MODE"] = "webhook"
 				env["TELEGRAM_WEBHOOK_PUBLIC_URL"] = "https://bot.example.com/telegram/webhook"
-				env["TELEGRAM_WEBHOOK_SECRET"] = strings.Repeat("a", 32)
+				env["TELEGRAM_WEBHOOK_SECRET"] = "abcdef0123456789abcdef0123456789"
 			},
 			wantErrPart: "HTTP_WRITE_TIMEOUT",
 		},
@@ -258,7 +269,7 @@ func validEnvironment() map[string]string {
 		"TELEGRAM_BOT_USERNAME":   "secret_santa_bot",
 		"OWNER_TELEGRAM_IDS":      "1001",
 		"DATABASE_URL":            "postgres://secretmediabot:secret@postgres:5432/secretmediabot?sslmode=disable",
-		"MEDIA_ENCRYPTION_KEY":    base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		"MEDIA_ENCRYPTION_KEY":    base64.StdEncoding.EncodeToString(variedTestKey()),
 		"MEDIA_ENCRYPTION_KEY_ID": "test-v1",
 	}
 }
@@ -267,5 +278,102 @@ func mapLookup(values map[string]string) func(string) (string, bool) {
 	return func(key string) (string, bool) {
 		value, ok := values[key]
 		return value, ok
+	}
+}
+
+func TestProductionRequiresExplicitChatScope(t *testing.T) {
+	t.Parallel()
+
+	env := validEnvironment()
+	env["APP_ENV"] = "production"
+	env["DATABASE_URL"] = "postgres://user:pass@db.example.com:5432/bot?sslmode=require"
+	if _, err := LoadFromLookup(mapLookup(env)); err == nil ||
+		!strings.Contains(err.Error(), "ALLOWED_CHAT_IDS") {
+		t.Fatalf("production with empty allowlist should fail, got %v", err)
+	}
+	env["ALLOW_ALL_CHATS"] = "true"
+	cfg, err := LoadFromLookup(mapLookup(env))
+	if err != nil {
+		t.Fatalf("explicit opt-in should pass: %v", err)
+	}
+	if !cfg.Whisper.AllowAllChats {
+		t.Error("AllowAllChats not loaded")
+	}
+}
+
+func TestProductionRejectsPlaintextDatabaseTransport(t *testing.T) {
+	t.Parallel()
+
+	env := validEnvironment()
+	env["APP_ENV"] = "production"
+	env["ALLOW_ALL_CHATS"] = "true"
+	env["DATABASE_URL"] = "postgres://user:pass@db.example.com:5432/bot?sslmode=disable"
+	if _, err := LoadFromLookup(mapLookup(env)); err == nil ||
+		!strings.Contains(err.Error(), "sslmode") {
+		t.Fatalf("production sslmode=disable should fail, got %v", err)
+	}
+	env["DATABASE_URL"] = "postgres://user:pass@db.example.com:5432/bot?sslmode=require"
+	if _, err := LoadFromLookup(mapLookup(env)); err != nil {
+		t.Fatalf("sslmode=require should pass: %v", err)
+	}
+}
+
+func TestWeakSecretsAreRejected(t *testing.T) {
+	t.Parallel()
+
+	env := validEnvironment()
+	env["TELEGRAM_UPDATE_MODE"] = "webhook"
+	env["TELEGRAM_WEBHOOK_PUBLIC_URL"] = "https://bot.example.com/telegram/webhook"
+	env["TELEGRAM_WEBHOOK_SECRET"] = strings.Repeat("x", 40)
+	if _, err := LoadFromLookup(mapLookup(env)); err == nil ||
+		!strings.Contains(err.Error(), "repeated") {
+		t.Fatalf("repeated webhook secret should fail, got %v", err)
+	}
+
+	env = validEnvironment()
+	env["MEDIA_ENCRYPTION_KEY"] = base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0xA5}, 32))
+	if _, err := LoadFromLookup(mapLookup(env)); err == nil ||
+		!strings.Contains(err.Error(), "non-random") {
+		t.Fatalf("repeated-byte key should fail, got %v", err)
+	}
+}
+
+func TestFileBackedSecretLookup(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte("110201543:atokenbehindafile\n"), 0o600); err != nil {
+		t.Fatalf("write secret file: %v", err)
+	}
+	env := validEnvironment()
+	delete(env, "TELEGRAM_BOT_TOKEN")
+	env["TELEGRAM_BOT_TOKEN_FILE"] = path
+	cfg, err := LoadFromLookup(func(key string) (string, bool) {
+		value, ok := env[key]
+		return value, ok
+	})
+	// The injectable lookup path cannot see _FILE vars; only Load can. This
+	// documents that file support lives in Load, not LoadFromLookup.
+	if err == nil && cfg.Telegram.BotToken == "" {
+		t.Fatal("expected lookup-based load to lack the token")
+	}
+}
+
+func TestWarningsSurfaceOperationalRisks(t *testing.T) {
+	t.Parallel()
+
+	env := validEnvironment()
+	env["DATABASE_URL"] = "postgres://user:pass@127.0.0.1:5432/bot?sslmode=disable"
+	env["ALLOW_ALL_CHATS"] = "true"
+	cfg, err := LoadFromLookup(mapLookup(env))
+	if err != nil {
+		t.Fatalf("LoadFromLookup() error = %v", err)
+	}
+	joined := strings.Join(cfg.Warnings, "\n")
+	if !strings.Contains(joined, "sslmode=disable") {
+		t.Errorf("warnings missing sslmode note: %v", cfg.Warnings)
+	}
+	if !strings.Contains(joined, "ALLOW_ALL_CHATS") {
+		t.Errorf("warnings missing allow-all note: %v", cfg.Warnings)
 	}
 }

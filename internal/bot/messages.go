@@ -122,26 +122,7 @@ func (h *Handler) handlePrivateMessage(ctx context.Context, message telegram.Mes
 		case "privacy":
 			return h.sendReply(ctx, message, privacyText, nil)
 		case "cancel":
-			if h.guest != nil {
-				guestCancelErr := h.guest.CancelGuestRequest(ctx, sender.TelegramUserID)
-				if guestCancelErr == nil {
-					return h.sendReply(ctx, message, "Locked secret cancelled.", nil)
-				}
-				if !errors.Is(guestCancelErr, service.ErrGuestNotFound) {
-					return guestCancelErr
-				}
-			}
-			_, cancelErr := h.service.CancelLatestDraft(ctx, sender.TelegramUserID)
-			if cancelErr != nil {
-				if text, expected := userMessage(cancelErr); expected {
-					return h.sendReply(ctx, message, text, nil)
-				}
-				return cancelErr
-			}
-			if err := h.sendReply(ctx, message, "Draft cancelled.", nil); err != nil {
-				h.logger.WarnContext(ctx, "draft cancellation acknowledgement failed")
-			}
-			return nil
+			return h.handleCancel(ctx, message, sender)
 		case "owner_list", "owner_open", "owner_delete", "owner_retain":
 			return h.handleOwnerCommand(ctx, message, sender, parsed)
 		default:
@@ -155,6 +136,55 @@ func (h *Handler) handlePrivateMessage(ctx context.Context, message telegram.Mes
 		}
 	}
 	return h.ingestSecret(ctx, message, sender)
+}
+
+func (h *Handler) handleCancel(ctx context.Context, message telegram.Message, sender domain.User) error {
+	cancelledGuest := 0
+	if h.guest != nil {
+		count, guestCancelErr := h.guest.CancelGuestRequest(ctx, sender.TelegramUserID)
+		if guestCancelErr != nil && !errors.Is(guestCancelErr, service.ErrGuestNotFound) {
+			if text, expected := userMessage(guestCancelErr); expected {
+				return h.sendReply(ctx, message, text, nil)
+			}
+			return guestCancelErr
+		}
+		if guestCancelErr == nil {
+			cancelledGuest = count
+		}
+	}
+	cancelledDraft := false
+	_, cancelErr := h.service.CancelLatestDraft(ctx, sender.TelegramUserID)
+	switch {
+	case cancelErr == nil:
+		cancelledDraft = true
+	case errors.Is(cancelErr, service.ErrDraftNotFound):
+		// nothing to report; the guest result (if any) decides the message
+	default:
+		if text, expected := userMessage(cancelErr); expected {
+			return h.sendReply(ctx, message, text, nil)
+		}
+		return cancelErr
+	}
+	switch {
+	case cancelledDraft:
+		if err := h.sendReply(ctx, message, draftCancelText(cancelledGuest), nil); err != nil {
+			// The cancellation already committed; a failed acknowledgement
+			// must not be retried as if the mutation itself failed.
+			h.logger.WarnContext(ctx, "draft cancellation acknowledgement failed")
+		}
+		return nil
+	case cancelledGuest > 0:
+		return h.sendReply(ctx, message, "Locked secret cancelled.", nil)
+	default:
+		return h.sendReply(ctx, message, "No active draft was found. Start with /whisper in a shared group.", nil)
+	}
+}
+
+func draftCancelText(cancelledGuest int) string {
+	if cancelledGuest > 0 {
+		return "Draft and locked secret cancelled."
+	}
+	return "Draft cancelled."
 }
 
 func (h *Handler) handleStart(
@@ -196,22 +226,34 @@ func (h *Handler) handleGuestStart(ctx context.Context, message telegram.Message
 			return h.sendReply(ctx, message, "Composer ready. Send secret text or one supported media item privately. Use /cancel to stop.", nil)
 		case repository.GuestStateReady:
 			return h.sendReply(ctx, message, "The secret is ready. The target can open it privately from the group envelope.", nil)
+		case repository.GuestStateOpening:
+			return h.sendReply(ctx, message, "A delivery attempt is in progress. If it fails, the envelope becomes openable again shortly.", nil)
 		case repository.GuestStateOpened:
 			return h.sendReply(ctx, message, "The secret was already opened.", nil)
 		default:
 			return h.sendReply(ctx, message, "This locked secret is no longer available.", nil)
 		}
 	}
-	if session.Request.State == repository.GuestStateReady {
+	switch session.Request.State {
+	case repository.GuestStateReady:
 		return h.deliverGuestSecret(ctx, message, sender, session.Parameter)
-	}
-	if session.Request.State == repository.GuestStateOpened {
+	case repository.GuestStateOpening:
+		return h.sendReply(ctx, message, "A delivery attempt is already in progress. Try again in a few seconds.", nil)
+	case repository.GuestStateOpened:
 		return h.sendReply(ctx, message, "This locked secret was already opened.", nil)
+	case repository.GuestStateAwaitingSecret, repository.GuestStateIngestingSecret:
+		return h.sendReply(ctx, message, "The sender has not added the secret yet. Press Open privately again after it is ready.", nil)
+	default:
+		return h.sendReply(ctx, message, "This locked secret is no longer available.", nil)
 	}
-	return h.sendReply(ctx, message, "The sender has not added the secret yet. Press Open privately again after it is ready.", nil)
 }
 
 func (h *Handler) ingestGuestSecret(ctx context.Context, message telegram.Message, sender domain.User) (bool, error) {
+	// An explicit /whisper draft always wins the private composer: otherwise a
+	// pending guest request would silently starve the draft until it expired.
+	if hasDraft, draftErr := h.service.HasActiveDraft(ctx, sender.TelegramUserID); draftErr == nil && hasDraft {
+		return false, nil
+	}
 	claim, err := h.guest.ClaimGuestIngestForSender(ctx, sender.TelegramUserID)
 	if errors.Is(err, service.ErrGuestNotFound) {
 		return false, nil
@@ -261,7 +303,7 @@ func (h *Handler) ingestGuestSecret(ctx context.Context, message telegram.Messag
 			media.SizeBytes = file.FileSize
 		}
 		downloadCtx, cancelDownload := context.WithTimeout(ctx, h.mediaDownloadTimeout)
-		bytes, downloadErr := h.telegram.DownloadFile(downloadCtx, file.FilePath)
+		bytes, downloadErr := h.telegram.DownloadFile(downloadCtx, file.FilePath, file.FileSize)
 		cancelDownload()
 		if downloadErr != nil {
 			if errors.Is(downloadErr, telegram.ErrFileTooLarge) {
@@ -374,7 +416,7 @@ func (h *Handler) ingestSecret(ctx context.Context, message telegram.Message, se
 			media.SizeBytes = file.FileSize
 		}
 		downloadCtx, cancelDownload := context.WithTimeout(ctx, h.mediaDownloadTimeout)
-		bytes, downloadErr := h.telegram.DownloadFile(downloadCtx, file.FilePath)
+		bytes, downloadErr := h.telegram.DownloadFile(downloadCtx, file.FilePath, file.FileSize)
 		cancelDownload()
 		if downloadErr != nil {
 			if errors.Is(downloadErr, telegram.ErrFileTooLarge) {
@@ -398,8 +440,14 @@ func (h *Handler) ingestSecret(ctx context.Context, message telegram.Message, se
 		err = h.Publish(ctx, publication)
 	}
 	if err != nil {
+		if service.IsNoPublication(err) {
+			// The envelope can never be published from this state (for example
+			// the whisper expired between finalize and publish); be honest
+			// instead of promising a delivery that will not happen.
+			return h.sendReply(ctx, message, "Secret stored securely, but the group envelope could not be queued. It will not be delivered.", nil)
+		}
 		h.logger.WarnContext(ctx, "envelope publication queued for retry")
-		if replyErr := h.sendReply(ctx, message, "Secret stored securely. The group envelope is queued for delivery.", nil); replyErr != nil {
+		if replyErr := h.sendReply(ctx, message, "Secret stored securely. The group envelope will be posted shortly.", nil); replyErr != nil {
 			h.logger.WarnContext(ctx, "queued publication acknowledgement failed")
 		}
 		return nil
@@ -528,6 +576,12 @@ func userMessage(err error) (string, bool) {
 		return "This locked secret was already opened.", true
 	case errors.Is(err, service.ErrGuestSecretNotReady):
 		return "The secret is not ready yet. Try again after the sender adds it.", true
+	case errors.Is(err, service.ErrGuestActiveLimit):
+		return "You already have an active locked secret. Finish it or use /cancel before creating another.", true
+	case errors.Is(err, service.ErrGuestRateLimit):
+		return "You have reached the hourly locked-secret limit. Try again later.", true
+	case errors.Is(err, service.ErrGuestOpeningInProgress):
+		return "A delivery attempt is already in progress. Try again in a few seconds.", true
 	default:
 		return "", false
 	}

@@ -15,12 +15,13 @@ const (
 	OpenDeniedExpired       OpenEventOutcome = "denied_expired"
 	OpenDeniedRevoked       OpenEventOutcome = "denied_revoked"
 	OpenDeniedAlreadyOpened OpenEventOutcome = "denied_already_opened"
+	OpenDeniedAmbiguous     OpenEventOutcome = "denied_ambiguous"
 	OpenDeliveryFailed      OpenEventOutcome = "delivery_failed"
 )
 
 func (o OpenEventOutcome) IsValid() bool {
 	switch o {
-	case OpenAllowed, OpenDeniedWrongUser, OpenDeniedNotActive, OpenDeniedExpired, OpenDeniedRevoked, OpenDeniedAlreadyOpened, OpenDeliveryFailed:
+	case OpenAllowed, OpenDeniedWrongUser, OpenDeniedNotActive, OpenDeniedExpired, OpenDeniedRevoked, OpenDeniedAlreadyOpened, OpenDeniedAmbiguous, OpenDeliveryFailed:
 		return true
 	default:
 		return false

@@ -70,7 +70,10 @@ func TestPollerProcessesUpdatesAndAdvancesOffset(t *testing.T) {
 	source := &sourceStub{updates: []telegram.Update{{UpdateID: 10}, {UpdateID: 11}}}
 	processor := &processStub{cancel: cancel}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	poller := NewPoller(source, processor, time.Second, time.Second, logger)
+	poller, err := NewPoller(source, processor, time.Second, time.Second, logger)
+	if err != nil {
+		t.Fatalf("NewPoller() error = %v", err)
+	}
 
 	if err := poller.Run(ctx); err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -88,7 +91,10 @@ func TestPollerStopsOnContextAfterProcessingFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	source := &sourceStub{updates: []telegram.Update{{UpdateID: 10}}}
 	processor := &processStub{err: errors.New("boom"), cancel: cancel}
-	poller := NewPoller(source, processor, time.Second, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	poller, err := NewPoller(source, processor, time.Second, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("NewPoller() error = %v", err)
+	}
 
 	if err := poller.Run(ctx); err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -113,9 +119,12 @@ func TestPollerBoundsGetUpdatesByPollAndRequestTimeout(t *testing.T) {
 		cancel()
 		return nil, callCtx.Err()
 	})
-	poller := NewPoller(source, processFunc(func(context.Context, telegram.Update) error {
+	poller, err := NewPoller(source, processFunc(func(context.Context, telegram.Update) error {
 		return nil
 	}), pollTimeout, requestTimeout, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("NewPoller() error = %v", err)
+	}
 	started := time.Now()
 
 	if err := poller.Run(ctx); err != nil {
@@ -141,8 +150,12 @@ func TestPollerRetriesBusyUpdateWithGrowingBackoffAndRedactedLogs(t *testing.T) 
 		return errors.Join(ErrUpdateBusy, errors.New(sensitive))
 	})
 	var logs bytes.Buffer
-	poller := NewPoller(source, processor, time.Second, time.Second, slog.New(slog.NewTextHandler(&logs, nil)))
+	poller, err := NewPoller(source, processor, time.Second, time.Second, slog.New(slog.NewTextHandler(&logs, nil)))
+	if err != nil {
+		t.Fatalf("NewPoller() error = %v", err)
+	}
 	var delays []time.Duration
+	poller.jitter = func(delay time.Duration) time.Duration { return delay }
 	poller.wait = func(_ context.Context, delay time.Duration) bool {
 		delays = append(delays, delay)
 		if len(delays) == 2 {
@@ -175,9 +188,12 @@ func TestPollerSourceFailureLogIsRedacted(t *testing.T) {
 		return nil, errors.New(sensitive)
 	})
 	var logs bytes.Buffer
-	poller := NewPoller(source, processFunc(func(context.Context, telegram.Update) error {
+	poller, pollerErr := NewPoller(source, processFunc(func(context.Context, telegram.Update) error {
 		return nil
 	}), time.Second, time.Second, slog.New(slog.NewTextHandler(&logs, nil)))
+	if pollerErr != nil {
+		t.Fatalf("NewPoller() error = %v", pollerErr)
+	}
 	poller.wait = func(context.Context, time.Duration) bool { return false }
 
 	if err := poller.Run(context.Background()); err != nil {

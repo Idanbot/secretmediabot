@@ -34,6 +34,8 @@ func (SecretBytes) GoString() string { return "[REDACTED]" }
 type Config struct {
 	AppEnv   string
 	LogLevel string
+	// Warnings carries non-fatal operational warnings the caller should log.
+	Warnings []string
 
 	HTTP     HTTPConfig
 	Telegram TelegramConfig
@@ -63,6 +65,8 @@ type TelegramConfig struct {
 	PollTimeout           time.Duration
 	RequestTimeout        time.Duration
 	OwnerIDs              []int64
+	// GuestModeEnabled controls guest mentions and inline locked envelopes.
+	GuestModeEnabled bool
 }
 
 type DatabaseConfig struct {
@@ -75,18 +79,23 @@ type DatabaseConfig struct {
 }
 
 type WhisperConfig struct {
-	DraftTTL                  time.Duration
-	DefaultTTL                time.Duration
-	MaxTTL                    time.Duration
-	DefaultOneTime            bool
-	ProtectContent            bool
-	MaxActiveDraftsPerUser    int
-	MaxWhispersPerUserPerHour int
-	AllowedChatIDs            []int64
-	PublishLeaseTimeout       time.Duration
-	PublishInterval           time.Duration
-	EphemeralDeleteAfter      time.Duration
-	EphemeralDeleteInterval   time.Duration
+	DraftTTL                       time.Duration
+	DefaultTTL                     time.Duration
+	MaxTTL                         time.Duration
+	DefaultOneTime                 bool
+	ProtectContent                 bool
+	MaxActiveDraftsPerUser         int
+	MaxWhispersPerUserPerHour      int
+	MaxActiveGuestRequestsPerUser  int
+	MaxGuestRequestsPerUserPerHour int
+	AllowedChatIDs                 []int64
+	// AllowAllChats explicitly opts in to operating in every group that adds
+	// the bot when ALLOWED_CHAT_IDS is empty. Required in production.
+	AllowAllChats           bool
+	PublishLeaseTimeout     time.Duration
+	PublishInterval         time.Duration
+	EphemeralDeleteAfter    time.Duration
+	EphemeralDeleteInterval time.Duration
 }
 
 type MediaConfig struct {
@@ -124,6 +133,7 @@ func Default() Config {
 			WebhookMaxConnections: 4,
 			PollTimeout:           30 * time.Second,
 			RequestTimeout:        15 * time.Second,
+			GuestModeEnabled:      true,
 		},
 		Database: DatabaseConfig{
 			MaxConns:        10,
@@ -133,17 +143,19 @@ func Default() Config {
 			ConnectTimeout:  10 * time.Second,
 		},
 		Whisper: WhisperConfig{
-			DraftTTL:                  10 * time.Minute,
-			DefaultTTL:                24 * time.Hour,
-			MaxTTL:                    7 * 24 * time.Hour,
-			DefaultOneTime:            true,
-			ProtectContent:            true,
-			MaxActiveDraftsPerUser:    1,
-			MaxWhispersPerUserPerHour: 30,
-			PublishLeaseTimeout:       2 * time.Minute,
-			PublishInterval:           2 * time.Second,
-			EphemeralDeleteAfter:      30 * time.Second,
-			EphemeralDeleteInterval:   2 * time.Second,
+			DraftTTL:                       10 * time.Minute,
+			DefaultTTL:                     24 * time.Hour,
+			MaxTTL:                         7 * 24 * time.Hour,
+			DefaultOneTime:                 true,
+			ProtectContent:                 true,
+			MaxActiveDraftsPerUser:         1,
+			MaxWhispersPerUserPerHour:      30,
+			MaxActiveGuestRequestsPerUser:  1,
+			MaxGuestRequestsPerUserPerHour: 6,
+			PublishLeaseTimeout:            2 * time.Minute,
+			PublishInterval:                2 * time.Second,
+			EphemeralDeleteAfter:           30 * time.Second,
+			EphemeralDeleteInterval:        2 * time.Second,
 		},
 		Media: MediaConfig{
 			StorageMode:     mediaStoragePostgres,
@@ -160,9 +172,31 @@ func Default() Config {
 	}
 }
 
-// Load reads configuration from the process environment.
+// Load reads configuration from the process environment. Any variable may
+// alternatively be supplied as VAR_FILE pointing at a file containing the
+// value (Docker/Compose file-based secrets).
 func Load() (Config, error) {
-	return LoadFromLookup(os.LookupEnv)
+	var fileErr error
+	lookup := func(key string) (string, bool) {
+		value, ok := os.LookupEnv(key)
+		if ok && strings.TrimSpace(value) != "" {
+			return value, true
+		}
+		path, hasFile := os.LookupEnv(key + "_FILE")
+		if !hasFile || strings.TrimSpace(path) == "" {
+			return value, ok
+		}
+		data, err := os.ReadFile(strings.TrimSpace(path))
+		if err != nil {
+			if fileErr == nil {
+				fileErr = fmt.Errorf("config %s_FILE: %w", key, err)
+			}
+			return "", false
+		}
+		return strings.TrimSpace(string(data)), true
+	}
+	cfg, err := LoadFromLookup(lookup)
+	return cfg, errors.Join(fileErr, err)
 }
 
 // LoadFromLookup is Load with an injectable environment lookup, useful for
@@ -191,6 +225,7 @@ func LoadFromLookup(lookup func(string) (string, bool)) (Config, error) {
 	l.duration("TELEGRAM_POLL_TIMEOUT", &cfg.Telegram.PollTimeout)
 	l.duration("TELEGRAM_REQUEST_TIMEOUT", &cfg.Telegram.RequestTimeout)
 	l.int64List("OWNER_TELEGRAM_IDS", &cfg.Telegram.OwnerIDs, true)
+	l.boolean("GUEST_MODE_ENABLED", &cfg.Telegram.GuestModeEnabled)
 
 	l.text("DATABASE_URL", &cfg.Database.URL)
 	l.int32("DB_MAX_CONNS", &cfg.Database.MaxConns)
@@ -206,7 +241,10 @@ func LoadFromLookup(lookup func(string) (string, bool)) (Config, error) {
 	l.boolean("PROTECT_CONTENT", &cfg.Whisper.ProtectContent)
 	l.integer("MAX_ACTIVE_DRAFTS_PER_USER", &cfg.Whisper.MaxActiveDraftsPerUser)
 	l.integer("MAX_WHISPERS_PER_USER_PER_HOUR", &cfg.Whisper.MaxWhispersPerUserPerHour)
+	l.integer("GUEST_MAX_ACTIVE_REQUESTS_PER_USER", &cfg.Whisper.MaxActiveGuestRequestsPerUser)
+	l.integer("GUEST_MAX_REQUESTS_PER_USER_PER_HOUR", &cfg.Whisper.MaxGuestRequestsPerUserPerHour)
 	l.int64List("ALLOWED_CHAT_IDS", &cfg.Whisper.AllowedChatIDs, false)
+	l.boolean("ALLOW_ALL_CHATS", &cfg.Whisper.AllowAllChats)
 	l.duration("PUBLISH_LEASE_TIMEOUT", &cfg.Whisper.PublishLeaseTimeout)
 	l.duration("PUBLISH_INTERVAL", &cfg.Whisper.PublishInterval)
 	l.duration("EPHEMERAL_DELETE_AFTER", &cfg.Whisper.EphemeralDeleteAfter)
@@ -234,6 +272,7 @@ func LoadFromLookup(lookup func(string) (string, bool)) (Config, error) {
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
+	cfg.Warnings = cfg.warnings()
 	return cfg, nil
 }
 
@@ -300,6 +339,9 @@ func (c Config) Validate() error {
 				return errors.New("config TELEGRAM_WEBHOOK_SECRET: only A-Z, a-z, 0-9, _ and - are allowed")
 			}
 		}
+		if isRepeatedString(c.Telegram.WebhookSecret) {
+			return errors.New("config TELEGRAM_WEBHOOK_SECRET: must not be a single repeated character")
+		}
 		// Webhook processing is synchronous. Ensure the HTTP response deadline
 		// cannot expire during the longest media path: metadata lookup, file
 		// download, envelope publication, and the best-effort acknowledgement.
@@ -318,7 +360,7 @@ func (c Config) Validate() error {
 		return fmt.Errorf("config TELEGRAM_UPDATE_MODE: unsupported value %q", c.Telegram.UpdateMode)
 	}
 
-	if err := validateDatabaseURL(c.Database.URL); err != nil {
+	if err := validateDatabaseURL(c.Database.URL, c.ProductionLike()); err != nil {
 		return err
 	}
 	if c.Database.MaxConns <= 0 || c.Database.MinConns < 0 || c.Database.MinConns > c.Database.MaxConns {
@@ -339,6 +381,14 @@ func (c Config) Validate() error {
 	}
 	if c.Whisper.MaxWhispersPerUserPerHour <= 0 {
 		return errors.New("config MAX_WHISPERS_PER_USER_PER_HOUR: must be positive")
+	}
+	if c.Whisper.MaxActiveGuestRequestsPerUser <= 0 || c.Whisper.MaxGuestRequestsPerUserPerHour <= 0 {
+		return errors.New("config guest limits: GUEST_MAX_ACTIVE_REQUESTS_PER_USER and GUEST_MAX_REQUESTS_PER_USER_PER_HOUR must be positive")
+	}
+	// Fail closed in production: an operator who forgets ALLOWED_CHAT_IDS
+	// must not silently get a bot that answers in every group on Telegram.
+	if c.ProductionLike() && len(c.Whisper.AllowedChatIDs) == 0 && !c.Whisper.AllowAllChats {
+		return errors.New("config ALLOWED_CHAT_IDS: production requires an explicit allowlist (or ALLOW_ALL_CHATS=true to opt in deliberately)")
 	}
 	if c.Whisper.PublishLeaseTimeout <= 0 || c.Whisper.PublishInterval <= 0 {
 		return errors.New("config publication: PUBLISH_LEASE_TIMEOUT and PUBLISH_INTERVAL must be positive")
@@ -371,6 +421,12 @@ func (c Config) Validate() error {
 	if len(c.Media.EncryptionKey) != 32 {
 		return errors.New("config MEDIA_ENCRYPTION_KEY: must decode to exactly 32 bytes")
 	}
+	// Catch copy-paste and placeholder deployment errors: an all-zero or
+	// single-byte-pattern key silently encrypts everything under a guessable
+	// key.
+	if isLowEntropyBytes(c.Media.EncryptionKey) {
+		return errors.New("config MEDIA_ENCRYPTION_KEY: key material looks non-random (all-zero or repeated bytes)")
+	}
 
 	if c.Cleanup.Interval <= 0 || c.Cleanup.BatchSize <= 0 || c.Cleanup.ProcessedUpdateRetention <= 0 {
 		return errors.New("config cleanup: interval, batch size, and processed-update retention must be positive")
@@ -385,6 +441,78 @@ func (c Config) IsOwner(userID int64) bool {
 		}
 	}
 	return false
+}
+
+// ProductionLike reports whether the deployment demands production posture.
+func (c Config) ProductionLike() bool {
+	return c.AppEnv == "production"
+}
+
+// warnings lists non-fatal conditions an operator should see at startup.
+func (c Config) warnings() []string {
+	var warnings []string
+	switch c.AppEnv {
+	case "development", "test", "production":
+	default:
+		warnings = append(warnings,
+			"APP_ENV "+c.AppEnv+" is not one of development, test, or production; production posture is not applied")
+	}
+	if !c.ProductionLike() && len(c.Whisper.AllowedChatIDs) == 0 && c.Whisper.AllowAllChats {
+		warnings = append(warnings,
+			"ALLOW_ALL_CHATS is enabled with an empty ALLOWED_CHAT_IDS: the bot will operate in every group that adds it")
+	}
+	if database, err := url.Parse(c.Database.URL); err == nil {
+		switch database.Query().Get("sslmode") {
+		case "disable", "allow":
+			if c.ProductionLike() {
+				// Validate already rejected this; unreachable defensively.
+				warnings = append(warnings, "DATABASE_URL uses an unencrypted transport")
+			} else {
+				warnings = append(warnings,
+					"DATABASE_URL sslmode=disable: database traffic is unencrypted; acceptable only on a trusted internal network")
+			}
+		case "":
+			warnings = append(warnings,
+				"DATABASE_URL has no explicit sslmode; PostgreSQL defaults to 'prefer'. Set sslmode=require or verify-full explicitly")
+		}
+	}
+	if !c.Telegram.GuestModeEnabled {
+		warnings = append(warnings, "GUEST_MODE_ENABLED=false: guest mentions and inline locked envelopes are disabled")
+	}
+	return warnings
+}
+
+func isRepeatedString(value string) bool {
+	if len(value) < 2 {
+		return false
+	}
+	first := value[0]
+	for index := 1; index < len(value); index++ {
+		if value[index] != first {
+			return false
+		}
+	}
+	return true
+}
+
+func isLowEntropyBytes(value []byte) bool {
+	if len(value) == 0 {
+		return true
+	}
+	allZero := true
+	repeated := true
+	for index, b := range value {
+		if b != 0 {
+			allZero = false
+		}
+		if b != value[0] {
+			repeated = false
+		}
+		if index > 0 && !allZero && !repeated {
+			return false
+		}
+	}
+	return allZero || repeated
 }
 
 // IsChatAllowed returns true when the allowlist is empty or contains chatID.
@@ -411,10 +539,19 @@ func validateHTTPURL(name, raw string, allowHTTP bool) error {
 	return fmt.Errorf("config %s: must use HTTPS", name)
 }
 
-func validateDatabaseURL(raw string) error {
+func validateDatabaseURL(raw string, productionLike bool) error {
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" || (u.Scheme != "postgres" && u.Scheme != "postgresql") {
 		return errors.New("config DATABASE_URL: must be an absolute postgres or postgresql URL")
+	}
+	// Ciphertext, token hashes, and audit rows cross this channel. Production
+	// deployments must not send them in plaintext; internal Compose networks
+	// in development may.
+	if productionLike {
+		switch u.Query().Get("sslmode") {
+		case "disable", "allow":
+			return errors.New("config DATABASE_URL: sslmode=disable/allow is not permitted outside development; use require or verify-full")
+		}
 	}
 	return nil
 }

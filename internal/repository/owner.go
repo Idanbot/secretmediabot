@@ -205,3 +205,50 @@ func insertOwnerAudit(tx *gorm.DB, ownerID int64, whisperID *uuid.UUID, action d
         ) VALUES (?, ?, ?, TRUE, ?::jsonb, NOW())`,
 		ownerID, string(action), whisperID, string(encoded)).Error)
 }
+
+// WhisperMediaBlob is the stored encrypted media payload of a whisper plus its
+// delivery metadata, for the re-upload fallback when Telegram permanently
+// rejects the stored file_id.
+type WhisperMediaBlob struct {
+	WhisperID    uuid.UUID
+	MediaType    domain.MediaType
+	ContentType  string
+	TelegramFile *string
+	Stored       StoredEncryptedPayload
+}
+
+// FetchWhisperMedia loads a whisper's encrypted media blob without any owner
+// gate; callers must already hold a reserved one-time open for the whisper.
+func (s *Store) FetchWhisperMedia(ctx context.Context, whisperID uuid.UUID) (WhisperMediaBlob, error) {
+	db, err := s.withContext(ctx)
+	if err != nil {
+		return WhisperMediaBlob{}, err
+	}
+	if whisperID == uuid.Nil {
+		return WhisperMediaBlob{}, fmt.Errorf("%w: whisper ID is required", ErrInvalidInput)
+	}
+	var blob WhisperMediaBlob
+	err = db.Transaction(func(tx *gorm.DB) error {
+		var whisper whisperRow
+		if err := tx.Select("id", "media_type", "telegram_file_id").
+			Where("id = ?", whisperID).Take(&whisper).Error; err != nil {
+			return translateError(err)
+		}
+		if whisper.MediaType == nil {
+			return fmt.Errorf("%w: whisper has no media", ErrConflict)
+		}
+		var row mediaBlobRow
+		if err := tx.Where("whisper_id = ?", whisperID).Take(&row).Error; err != nil {
+			return translateError(err)
+		}
+		blob = WhisperMediaBlob{
+			WhisperID: whisperID, MediaType: domain.MediaType(*whisper.MediaType),
+			ContentType: row.ContentType, TelegramFile: whisper.TelegramFileID, Stored: row.toStored(),
+		}
+		return nil
+	})
+	if err != nil {
+		return WhisperMediaBlob{}, err
+	}
+	return blob, nil
+}

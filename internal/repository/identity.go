@@ -147,11 +147,14 @@ func upsertUser(db *gorm.DB, user domain.User, seenAt time.Time) error {
 	return db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "telegram_user_id"}},
 		DoUpdates: clause.Assignments(map[string]any{
-			"username":                 clause.Expr{SQL: "EXCLUDED.username"},
-			"first_name":               clause.Expr{SQL: "EXCLUDED.first_name"},
-			"last_name":                clause.Expr{SQL: "EXCLUDED.last_name"},
-			"is_bot":                   clause.Expr{SQL: "EXCLUDED.is_bot"},
-			"language_code":            clause.Expr{SQL: "EXCLUDED.language_code"},
+			// Keep the stored profile when the incoming observation is a stub
+			// (for example a numeric-only guest target): overwriting with empty
+			// values would silently destroy observed usernames and names.
+			"username":                 clause.Expr{SQL: "COALESCE(NULLIF(EXCLUDED.username, ''), users.username)"},
+			"first_name":               clause.Expr{SQL: "COALESCE(NULLIF(EXCLUDED.first_name, ''), users.first_name)"},
+			"last_name":                clause.Expr{SQL: "COALESCE(NULLIF(EXCLUDED.last_name, ''), users.last_name)"},
+			"is_bot":                   clause.Expr{SQL: "users.is_bot OR EXCLUDED.is_bot"},
+			"language_code":            clause.Expr{SQL: "COALESCE(NULLIF(EXCLUDED.language_code, ''), users.language_code)"},
 			"has_started_private_chat": clause.Expr{SQL: "users.has_started_private_chat OR EXCLUDED.has_started_private_chat"},
 			"last_seen_at":             clause.Expr{SQL: "GREATEST(users.last_seen_at, EXCLUDED.last_seen_at)"},
 			"updated_at":               clause.Expr{SQL: "GREATEST(users.updated_at, EXCLUDED.updated_at)"},

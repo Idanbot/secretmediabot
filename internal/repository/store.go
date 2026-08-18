@@ -19,9 +19,23 @@ var (
 	ErrNotActive           = errors.New("repository record is not active")
 	ErrAlreadyOpened       = errors.New("whisper already opened")
 	ErrLeaseLost           = errors.New("repository lease lost")
+	// ErrOpenAmbiguous marks a one-time whisper whose earlier reservation has
+	// neither completed nor failed, so the delivery outcome is unknowable.
+	// Re-opening would risk a duplicate delivery, so the open fails closed.
+	ErrOpenAmbiguous = errors.New("delivery outcome is ambiguous")
 	ErrAmbiguousRecipient  = errors.New("observed username matches multiple users")
 	ErrTooManyActiveDrafts = errors.New("too many active drafts")
 	ErrWhisperRateLimit    = errors.New("whisper rate limit exceeded")
+	// ErrUpdateDead marks an update that exhausted its retry budget. The
+	// processor must acknowledge and skip it so the stream keeps flowing.
+	ErrUpdateDead = errors.New("update exceeded its retry budget")
+	// ErrGuestActiveLimit and ErrGuestRateLimit bound guest/inline request
+	// creation, mirroring the draft and whisper quotas.
+	ErrGuestActiveLimit = errors.New("too many active guest requests")
+	ErrGuestRateLimit   = errors.New("guest request rate limit exceeded")
+	// ErrGuestOpeningInProgress marks a guest request whose delivery is
+	// currently reserved by another attempt within its lease.
+	ErrGuestOpeningInProgress = errors.New("guest delivery already in progress")
 )
 
 // Store owns all application persistence. It never enables GORM's automatic
@@ -244,6 +258,10 @@ type ClaimUpdateParams struct {
 	PayloadSHA256    []byte
 	Now              time.Time
 	LeaseUntil       time.Time
+	// MaxAttempts bounds redelivery retries for a single update. When the
+	// stored attempt count reaches it, ClaimUpdate reports ErrUpdateDead.
+	// Zero disables the cap.
+	MaxAttempts int
 }
 
 type UpdateLease struct {
@@ -288,6 +306,9 @@ type CleanupParams struct {
 	Now                    time.Time
 	ProcessedUpdatesBefore time.Time
 	BatchSize              int
+	// IdentityRetention bounds how long unseen chat memberships, users, and
+	// chats are kept once nothing references them. Zero skips that prune.
+	IdentityRetention time.Duration
 }
 
 type CleanupResult struct {
@@ -301,6 +322,14 @@ type CleanupResult struct {
 	DeletedEphemeralJobs    int64
 	DeletedGuestRequests    int64
 	DeletedGuestJobs        int64
+	DeletedDrafts           int64
+	DeletedMembers          int64
+	DeletedUsers            int64
+	DeletedChats            int64
+	// ExpiredDraftSenderIDs and ExpiredGuestSenderIDs identify the senders
+	// whose drafts/requests just expired so the worker can notify them.
+	ExpiredDraftSenderIDs []int64
+	ExpiredGuestSenderIDs []int64
 }
 
 func nowOr(value time.Time) time.Time {

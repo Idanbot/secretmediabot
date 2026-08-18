@@ -33,6 +33,23 @@ type SendEphemeralMediaRequest struct {
 	ProtectContent  bool
 }
 
+// SendEphemeralMediaUploadRequest carries decrypted media which is uploaded
+// multipart as an ephemeral response to a callback query. Used when Telegram
+// permanently rejects the stored file_id and the retained bytes must be
+// re-uploaded. Data is request-only and never included in errors or logs.
+type SendEphemeralMediaUploadRequest struct {
+	ChatID          int64
+	MessageThreadID *int64
+	ReceiverUserID  int64
+	CallbackQueryID string
+	Type            domain.MediaType
+	Data            []byte
+	FileName        string
+	ContentType     string
+	Caption         string
+	ProtectContent  bool
+}
+
 type SendPrivateMediaByFileIDRequest struct {
 	ChatID         int64
 	Type           domain.MediaType
@@ -247,62 +264,138 @@ func (c *Client) SendPrivateMedia(ctx context.Context, req SendPrivateMediaReque
 		return Message{}, &FileTooLargeError{Limit: c.maxUploadBytes, ReportedSize: int64(len(req.Data))}
 	}
 
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	writeField := func(name, value string) error {
-		if value == "" {
-			return nil
-		}
-		return writer.WriteField(name, value)
+	fields := map[string]string{"chat_id": strconv.FormatInt(req.ChatID, 10)}
+	body, contentTypeHeader, bodyErr := buildMultipartBody(method, fields, field, req, req.Data)
+	if bodyErr != nil {
+		return Message{}, bodyErr
 	}
-	if err := writeField("chat_id", strconv.FormatInt(req.ChatID, 10)); err != nil {
-		return Message{}, &RequestError{Method: method, cause: errors.New("could not encode multipart metadata")}
-	}
-	if err := writeField("caption", req.Caption); err != nil {
-		return Message{}, &RequestError{Method: method, cause: errors.New("could not encode multipart metadata")}
-	}
-	if req.ProtectContent {
-		if err := writeField("protect_content", "true"); err != nil {
-			return Message{}, &RequestError{Method: method, cause: errors.New("could not encode multipart metadata")}
-		}
-	}
-
-	filename := safeFilename(req.FileName, req.Type)
-	contentType := strings.TrimSpace(req.ContentType)
-	if contentType == "" {
-		contentType = http.DetectContentType(req.Data)
-	} else {
-		parsedContentType, _, parseErr := mime.ParseMediaType(contentType)
-		if parseErr != nil || parsedContentType == "" {
-			return Message{}, fmt.Errorf("%w: media content type is malformed", ErrInvalidArgument)
-		}
-		contentType = parsedContentType
-	}
-	header := make(textproto.MIMEHeader)
-	header.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{
-		"name":     field,
-		"filename": filename,
-	}))
-	header.Set("Content-Type", contentType)
-	part, err := writer.CreatePart(header)
-	if err != nil {
-		return Message{}, &RequestError{Method: method, cause: errors.New("could not encode multipart media")}
-	}
-	if _, err := part.Write(req.Data); err != nil {
-		return Message{}, &RequestError{Method: method, cause: errors.New("could not encode multipart media")}
-	}
-	if err := writer.Close(); err != nil {
-		return Message{}, &RequestError{Method: method, cause: errors.New("could not finish multipart media")}
-	}
+	// Zero the duplicated plaintext once the request completes, mirroring the
+	// buffer hygiene applied to decrypted payloads elsewhere.
+	payload := body.Bytes()
+	defer func() { clear(payload); body.Reset() }()
 
 	var message Message
-	if err := c.call(ctx, method, writer.FormDataContentType(), &body, &message); err != nil {
+	if err := c.call(ctx, method, contentTypeHeader, body, &message); err != nil {
 		return Message{}, err
 	}
 	if message.Chat.ID == 0 {
 		return Message{}, &ProtocolError{Method: method, Reason: "result has no chat"}
 	}
 	return message, nil
+}
+
+// SendEphemeralMediaUpload uploads decrypted bytes as an ephemeral media
+// message visible only to the callback sender. It makes exactly one API
+// request and returns the ephemeral message ID required by
+// deleteEphemeralMessage.
+func (c *Client) SendEphemeralMediaUpload(ctx context.Context, req SendEphemeralMediaUploadRequest) (int64, error) {
+	method, field, err := mediaMethod(req.Type)
+	if err != nil {
+		return 0, err
+	}
+	if req.ChatID == 0 || req.ReceiverUserID <= 0 || len(req.Data) == 0 {
+		return 0, fmt.Errorf("%w: ephemeral media upload requires chat ID, receiver user ID, and data", ErrInvalidArgument)
+	}
+	if int64(len(req.Data)) > c.maxUploadBytes {
+		return 0, &FileTooLargeError{Limit: c.maxUploadBytes, ReportedSize: int64(len(req.Data))}
+	}
+	fields := map[string]string{
+		"chat_id":           strconv.FormatInt(req.ChatID, 10),
+		"receiver_user_id":  strconv.FormatInt(req.ReceiverUserID, 10),
+		"callback_query_id": req.CallbackQueryID,
+	}
+	if req.MessageThreadID != nil {
+		fields["message_thread_id"] = strconv.FormatInt(*req.MessageThreadID, 10)
+	}
+	body, contentTypeHeader, bodyErr := buildMultipartBody(method, fields, field, req, req.Data)
+	if bodyErr != nil {
+		return 0, bodyErr
+	}
+	payload := body.Bytes()
+	defer func() { clear(payload); body.Reset() }()
+
+	var message Message
+	if err := c.call(ctx, method, contentTypeHeader, body, &message); err != nil {
+		return 0, err
+	}
+	if message.EphemeralMessageID <= 0 {
+		return 0, &ProtocolError{Method: method, Reason: "result has no ephemeral message ID"}
+	}
+	return message.EphemeralMessageID, nil
+}
+
+// multipartMedia describes the media part of a multipart upload.
+type multipartMedia interface {
+	multipartMetadata() (fileName, contentType, caption string, protectContent bool)
+	mediaType() domain.MediaType
+}
+
+func (req SendPrivateMediaRequest) multipartMetadata() (string, string, string, bool) {
+	return req.FileName, req.ContentType, req.Caption, req.ProtectContent
+}
+
+func (req SendPrivateMediaRequest) mediaType() domain.MediaType { return req.Type }
+
+func (req SendEphemeralMediaUploadRequest) multipartMetadata() (string, string, string, bool) {
+	return req.FileName, req.ContentType, req.Caption, req.ProtectContent
+}
+
+func (req SendEphemeralMediaUploadRequest) mediaType() domain.MediaType { return req.Type }
+
+// buildMultipartBody assembles the multipart upload. The returned buffer is
+// owned by the caller, which must Reset it after the request completes so the
+// duplicated plaintext does not linger on the heap.
+func buildMultipartBody(method string, fields map[string]string, mediaField string, media multipartMedia, data []byte) (*bytes.Buffer, string, error) {
+	fileName, contentType, caption, protectContent := media.multipartMetadata()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for name, value := range fields {
+		if value == "" {
+			continue
+		}
+		if err := writer.WriteField(name, value); err != nil {
+			return nil, "", &RequestError{Method: method, cause: errors.New("could not encode multipart metadata")}
+		}
+	}
+	if caption != "" {
+		if err := writer.WriteField("caption", caption); err != nil {
+			return nil, "", &RequestError{Method: method, cause: errors.New("could not encode multipart metadata")}
+		}
+	}
+	if protectContent {
+		if err := writer.WriteField("protect_content", "true"); err != nil {
+			return nil, "", &RequestError{Method: method, cause: errors.New("could not encode multipart metadata")}
+		}
+	}
+
+	contentType = strings.TrimSpace(contentType)
+	if contentType == "" {
+		contentType = http.DetectContentType(data)
+	} else {
+		parsedContentType, _, parseErr := mime.ParseMediaType(contentType)
+		if parseErr != nil || parsedContentType == "" {
+			return nil, "", fmt.Errorf("%w: media content type is malformed", ErrInvalidArgument)
+		}
+		contentType = parsedContentType
+	}
+	header := make(textproto.MIMEHeader)
+	header.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{
+		"name":     mediaField,
+		"filename": safeFilename(fileName, media.mediaType()),
+	}))
+	header.Set("Content-Type", contentType)
+	part, err := writer.CreatePart(header)
+	if err != nil {
+		return nil, "", &RequestError{Method: method, cause: errors.New("could not encode multipart media")}
+	}
+	if _, err := part.Write(data); err != nil {
+		return nil, "", &RequestError{Method: method, cause: errors.New("could not encode multipart media")}
+	}
+	if err := writer.Close(); err != nil {
+		return nil, "", &RequestError{Method: method, cause: errors.New("could not finish multipart media")}
+	}
+	return &body, writer.FormDataContentType(), nil
 }
 
 func mediaMethod(mediaType domain.MediaType) (method, field string, err error) {

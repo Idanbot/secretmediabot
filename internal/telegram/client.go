@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/idan/secretmediabot/internal/metrics"
 )
 
 const (
@@ -23,9 +25,10 @@ const (
 )
 
 var (
-	ErrInvalidArgument = errors.New("telegram: invalid argument")
-	ErrInvalidResponse = errors.New("telegram: invalid API response")
-	ErrFileTooLarge    = errors.New("telegram: file exceeds configured size limit")
+	ErrInvalidArgument    = errors.New("telegram: invalid argument")
+	ErrInvalidResponse    = errors.New("telegram: invalid API response")
+	ErrFileTooLarge       = errors.New("telegram: file exceeds configured size limit")
+	ErrIncompleteDownload = errors.New("telegram: downloaded bytes do not match the reported file size")
 )
 
 // APIError is returned when Telegram responds with ok=false or a non-2xx HTTP
@@ -61,6 +64,43 @@ func (e *APIError) RetryAfter() time.Duration {
 		return 0
 	}
 	return time.Duration(e.Parameters.RetryAfter) * time.Second
+}
+
+// RateLimited reports whether Telegram rejected the request as too frequent.
+// It honors both the documented error code and a Retry-After parameter
+// arriving without one, as produced by some proxies.
+func (e *APIError) RateLimited() bool {
+	if e == nil {
+		return false
+	}
+	return e.ErrorCode == 429 || e.StatusCode == 429 || e.RetryAfter() > 0
+}
+
+// Permanent reports whether retrying an identical request can never succeed.
+// All non-rate-limited 4xx responses are permanent; 5xx and transport errors
+// are transient. This is the canonical classification for the whole
+// application — callers must not re-implement it.
+func (e *APIError) Permanent() bool {
+	if e == nil || e.RateLimited() {
+		return false
+	}
+	code := e.ErrorCode
+	if code == 0 {
+		code = e.StatusCode
+	}
+	return code >= 400 && code < 500
+}
+
+// IsPermanent classifies an arbitrary error returned by this package.
+func IsPermanent(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Permanent()
+}
+
+// IsRateLimited classifies an arbitrary error returned by this package.
+func IsRateLimited(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.RateLimited()
 }
 
 // RequestError describes a failure before Telegram returned an API response.
@@ -157,6 +197,18 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
+	// The Bot API never legitimately redirects, and 307/308 preserve the
+	// request body — following one would forward plaintext secret payloads to
+	// an attacker-chosen host. Enforce redirect refusal on every client,
+	// including injected ones, unless the caller deliberately set a policy.
+	if httpClient.CheckRedirect == nil {
+		cloned := new(http.Client)
+		*cloned = *httpClient
+		cloned.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+		httpClient = cloned
+	}
 
 	maxDownload := cfg.MaxDownloadBytes
 	if maxDownload == 0 {
@@ -212,9 +264,28 @@ func (c *Client) GetUpdates(ctx context.Context, req GetUpdatesRequest) ([]Updat
 		Timeout:        timeoutSeconds,
 		AllowedUpdates: req.AllowedUpdates,
 	}
-	var updates []Update
-	if err := c.callJSON(ctx, "getUpdates", wire, &updates); err != nil {
+	var rawUpdates []json.RawMessage
+	if err := c.callJSON(ctx, "getUpdates", wire, &rawUpdates); err != nil {
 		return nil, err
+	}
+	// Decode each update individually: one malformed entry must never wedge
+	// polling for the whole batch. When the update_id survives decoding, emit
+	// a shell update so the processor can acknowledge it and the polling
+	// offset advances; entries without a decodable ID are dropped and skipped
+	// by the next successfully acknowledged update.
+	updates := make([]Update, 0, len(rawUpdates))
+	for _, raw := range rawUpdates {
+		var update Update
+		if err := json.Unmarshal(raw, &update); err != nil {
+			var idOnly struct {
+				UpdateID int64 `json:"update_id"`
+			}
+			if json.Unmarshal(raw, &idOnly) == nil && idOnly.UpdateID > 0 {
+				updates = append(updates, Update{UpdateID: idOnly.UpdateID})
+			}
+			continue
+		}
+		updates = append(updates, update)
 	}
 	return updates, nil
 }
@@ -316,12 +387,17 @@ func (c *Client) GetFile(ctx context.Context, req GetFileRequest) (File, error) 
 }
 
 // DownloadFile downloads an already resolved Telegram file_path. Both the
-// declared Content-Length and bytes actually read are checked. LimitReader is
-// deliberately used even when Content-Length looks safe because that header
-// is not an integrity boundary.
-func (c *Client) DownloadFile(ctx context.Context, filePath string) ([]byte, error) {
+// declared Content-Length and bytes actually read are checked, and when the
+// caller supplies the size reported by getFile the received length must match
+// it exactly — a cleanly closed but truncated body is otherwise silently
+// accepted. LimitReader is deliberately used even when Content-Length looks
+// safe because that header is not an integrity boundary.
+func (c *Client) DownloadFile(ctx context.Context, filePath string, expectedSize int64) ([]byte, error) {
 	if !validFilePath(filePath) {
 		return nil, fmt.Errorf("%w: file path is missing or unsafe", ErrInvalidArgument)
+	}
+	if expectedSize < 0 {
+		return nil, fmt.Errorf("%w: expected size must not be negative", ErrInvalidArgument)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.fileEndpoint(filePath).String(), nil)
 	if err != nil {
@@ -350,6 +426,9 @@ func (c *Client) DownloadFile(ctx context.Context, filePath string) ([]byte, err
 	}
 	if int64(len(data)) > c.maxDownloadBytes {
 		return nil, &FileTooLargeError{Limit: c.maxDownloadBytes}
+	}
+	if expectedSize > 0 && int64(len(data)) != expectedSize {
+		return nil, fmt.Errorf("%w: expected=%d received=%d", ErrIncompleteDownload, expectedSize, len(data))
 	}
 	return data, nil
 }
@@ -409,6 +488,42 @@ func (c *Client) callJSON(ctx context.Context, method string, request, result an
 }
 
 func (c *Client) call(ctx context.Context, method, contentType string, body io.Reader, result any) error {
+	started := time.Now()
+	err := c.doCall(ctx, method, contentType, body, result)
+	recordRequest(method, started, err)
+	return err
+}
+
+func recordRequest(method string, started time.Time, err error) {
+	outcome := "ok"
+	switch {
+	case err == nil:
+	case errors.Is(err, ErrInvalidResponse):
+		outcome = "protocol_error"
+	default:
+		var apiErr *APIError
+		if errors.As(err, &apiErr) {
+			if apiErr.RateLimited() {
+				outcome = "rate_limited"
+			} else {
+				outcome = "api_error"
+			}
+		} else {
+			outcome = "request_error"
+		}
+	}
+	requestCount.Add(1, method, outcome)
+	requestDuration.Add(int64(time.Since(started).Microseconds()), method)
+}
+
+var (
+	requestCount = metrics.Counter(
+		"telegram_api_requests_total", "Telegram Bot API requests by method and outcome.", "method", "outcome")
+	requestDuration = metrics.Counter(
+		"telegram_api_request_duration_microseconds_total", "Cumulative Telegram Bot API request duration by method.", "method")
+)
+
+func (c *Client) doCall(ctx context.Context, method, contentType string, body io.Reader, result any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.methodEndpoint(method).String(), body)
 	if err != nil {
 		return &RequestError{Method: method, cause: c.safeCause(ctx, err)}

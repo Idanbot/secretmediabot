@@ -192,6 +192,17 @@ func (s *Service) ResumeDraft(ctx context.Context, sender domain.User, composePa
 	return ResumeDraftResult{Draft: draft, Recipient: recipient}, nil
 }
 
+// HasActiveDraft reports whether the sender has an unexpired active composer
+// draft. Private secret routing prefers an explicit /whisper draft over a
+// pending guest request so the draft cannot starve silently.
+func (s *Service) HasActiveDraft(ctx context.Context, senderID int64) (bool, error) {
+	count, err := s.store.CountActiveDrafts(ctx, senderID, s.now())
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 func (s *Service) CancelLatestDraft(ctx context.Context, senderID int64) (domain.Draft, error) {
 	draft, err := s.store.CancelLatestDraftForSender(ctx, senderID, s.now())
 	if errors.Is(err, repository.ErrNotFound) {

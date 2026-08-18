@@ -30,7 +30,8 @@ type GuestStore interface {
 	CompleteGuestOpen(context.Context, repository.GuestCompleteOpenParams) error
 	FailGuestOpen(context.Context, repository.GuestFailOpenParams) error
 	MarkGuestEnvelope(context.Context, []byte, string, time.Time) error
-	CancelGuestRequest(context.Context, repository.CancelGuestParams) error
+	CancelGuestRequest(context.Context, repository.CancelGuestParams) (int, error)
+	FindGuestMediaPayload(context.Context, uuid.UUID) (repository.GuestMediaBlob, error)
 }
 
 type CreateGuestRequestParams struct {
@@ -82,7 +83,7 @@ type GuestDelivery struct {
 }
 
 func (s *Service) CreateGuestRequest(ctx context.Context, params CreateGuestRequestParams) (GuestSession, error) {
-	if s.guestStore == nil {
+	if s.guestStore == nil || !s.options.GuestModeEnabled {
 		return GuestSession{}, ErrGuestUnavailable
 	}
 	if params.Sender.TelegramUserID <= 0 || params.Sender.IsBot {
@@ -114,17 +115,29 @@ func (s *Service) CreateGuestRequest(ctx context.Context, params CreateGuestRequ
 	case command.TargetUserID:
 		request.TargetUserID = cloneInt64(&params.Target.UserID)
 	case command.TargetUsername:
-		request.TargetUsername = strings.ToLower(strings.TrimPrefix(params.Target.Username, "@"))
+		normalized := strings.ToLower(strings.TrimPrefix(params.Target.Username, "@"))
+		// A self-targeted username could never be opened: usernames are
+		// unique, so the claim-time sender check would always reject it.
+		if normalized == normalizeUsernameHint(params.Sender.Username) {
+			return GuestSession{}, ErrTargetIsSender
+		}
+		request.TargetUsername = normalized
 	default:
 		return GuestSession{}, ErrTargetRequired
 	}
 	request, err = s.guestStore.CreateGuestRequest(ctx, repository.GuestCreateParams{
 		Request: request, Sender: params.Sender, Chat: params.SourceChat, Now: now,
+		MaxActivePerSender: s.options.MaxActiveGuestRequestsPerUser,
+		RecentSince:        now.Add(-time.Hour), MaxRecentPerSender: s.options.MaxGuestRequestsPerUserPerHour,
 	})
 	if err != nil {
 		return GuestSession{}, mapGuestRepositoryError(err)
 	}
 	return GuestSession{Request: request, Parameter: GuestPrefix + guestToken.Raw}, nil
+}
+
+func normalizeUsernameHint(value string) string {
+	return strings.ToLower(strings.TrimPrefix(strings.TrimSpace(value), "@"))
 }
 
 func (s *Service) MarkGuestEnvelope(ctx context.Context, parameter, inlineMessageID string) error {
@@ -138,11 +151,15 @@ func (s *Service) MarkGuestEnvelope(ctx context.Context, parameter, inlineMessag
 	return mapGuestRepositoryError(s.guestStore.MarkGuestEnvelope(ctx, hash, inlineMessageID, s.now()))
 }
 
-func (s *Service) CancelGuestRequest(ctx context.Context, senderID int64) error {
+func (s *Service) CancelGuestRequest(ctx context.Context, senderID int64) (int, error) {
 	if s.guestStore == nil {
-		return ErrGuestUnavailable
+		return 0, ErrGuestUnavailable
 	}
-	return mapGuestRepositoryError(s.guestStore.CancelGuestRequest(ctx, repository.CancelGuestParams{SenderID: senderID, Now: s.now()}))
+	count, err := s.guestStore.CancelGuestRequest(ctx, repository.CancelGuestParams{SenderID: senderID, Now: s.now()})
+	if err != nil {
+		return 0, mapGuestRepositoryError(err)
+	}
+	return count, nil
 }
 
 func (s *Service) BeginGuestSession(ctx context.Context, parameter string, actor domain.User) (GuestSession, error) {
@@ -278,6 +295,9 @@ func (s *Service) ReserveGuestOpen(ctx context.Context, parameter string, actor 
 	if err != nil {
 		return GuestDelivery{}, mapGuestRepositoryError(err)
 	}
+	if reservation.Request.OpeningLeaseUntil == nil {
+		return GuestDelivery{}, ErrGuestUnavailable
+	}
 	content := GuestPlaintextContent{Kind: reservation.Content.Kind, Media: reservation.Content.Media}
 	if reservation.Content.Text != nil {
 		content.Text, err = s.decryptGuestStored(secretcrypto.PurposeText, reservation.Request.ID, *reservation.Content.Text)
@@ -294,11 +314,25 @@ func (s *Service) ReserveGuestOpen(ctx context.Context, parameter string, actor 
 			return GuestDelivery{}, err
 		}
 	}
-	if reservation.Request.OpeningLeaseUntil == nil {
-		content.Zero()
-		return GuestDelivery{}, ErrGuestUnavailable
-	}
 	return GuestDelivery{Request: reservation.Request, Content: content, LeaseUntil: *reservation.Request.OpeningLeaseUntil}, nil
+}
+
+// GuestMediaFallback decrypts the stored media payload for a guest request so
+// delivery can re-upload the bytes when Telegram permanently rejects the
+// stored file_id. The caller must zero the returned buffer.
+func (s *Service) GuestMediaFallback(ctx context.Context, requestID uuid.UUID) ([]byte, domain.MediaType, string, error) {
+	if s.guestStore == nil {
+		return nil, "", "", ErrGuestUnavailable
+	}
+	blob, err := s.guestStore.FindGuestMediaPayload(ctx, requestID)
+	if err != nil {
+		return nil, "", "", mapGuestRepositoryError(err)
+	}
+	plaintext, err := s.decryptGuestStored(secretcrypto.PurposeMedia, requestID, blob.Stored)
+	if err != nil {
+		return nil, "", "", err
+	}
+	return plaintext, blob.MediaType, blob.Stored.ContentType, nil
 }
 
 func (s *Service) CompleteGuestOpen(ctx context.Context, delivery GuestDelivery, messageID int64) error {
@@ -383,6 +417,12 @@ func mapGuestRepositoryError(err error) error {
 		return ErrGuestSecretNotReady
 	case errors.Is(err, repository.ErrConflict), errors.Is(err, repository.ErrLeaseLost):
 		return ErrGuestSecretNotReady
+	case errors.Is(err, repository.ErrGuestActiveLimit):
+		return ErrGuestActiveLimit
+	case errors.Is(err, repository.ErrGuestRateLimit):
+		return ErrGuestRateLimit
+	case errors.Is(err, repository.ErrGuestOpeningInProgress):
+		return ErrGuestOpeningInProgress
 	default:
 		return err
 	}
@@ -416,4 +456,7 @@ var (
 	ErrGuestWrongRecipient    = errors.New("guest request belongs to another recipient")
 	ErrGuestAlreadyOpened     = errors.New("guest secret was already opened")
 	ErrGuestSecretNotReady    = errors.New("guest secret is not ready")
+	ErrGuestActiveLimit       = errors.New("too many active guest requests")
+	ErrGuestRateLimit         = errors.New("guest request rate limit exceeded")
+	ErrGuestOpeningInProgress = errors.New("guest delivery already in progress")
 )

@@ -60,6 +60,9 @@ func (s *Store) ClaimUpdate(ctx context.Context, params ClaimUpdateParams) (Upda
 			lease = UpdateLease{Attempts: existing.AttemptCount, LeaseUntil: cloneTimePointer(existing.LeaseUntil)}
 			return nil
 		}
+		if params.MaxAttempts > 0 && existing.AttemptCount >= params.MaxAttempts {
+			return fmt.Errorf("%w: update %d failed %d times", ErrUpdateDead, existing.TelegramUpdateID, existing.AttemptCount)
+		}
 
 		result = tx.Model(&processedUpdateRow{}).
 			Where("telegram_update_id = ?", params.TelegramUpdateID).
@@ -183,9 +186,10 @@ func (s *Store) MarkEphemeralDeleted(ctx context.Context, params FinishEphemeral
 	if params.JobID <= 0 || params.ExpectedLeaseUntil.IsZero() {
 		return fmt.Errorf("%w: invalid deletion completion", ErrInvalidInput)
 	}
+	terminalCode := safeErrorCode(params.ErrorCode)
 	result := db.Model(&ephemeralDeleteJobRow{}).
 		Where("id = ? AND deleted_at IS NULL AND lease_until = ?", params.JobID, params.ExpectedLeaseUntil.UTC()).
-		Updates(map[string]any{"deleted_at": now, "lease_until": nil, "last_error": nil, "updated_at": now})
+		Updates(map[string]any{"deleted_at": now, "lease_until": nil, "last_error": terminalCode, "updated_at": now})
 	if result.Error != nil {
 		return translateError(result.Error)
 	}

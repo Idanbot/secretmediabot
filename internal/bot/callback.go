@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/idan/secretmediabot/internal/domain"
+	"github.com/idan/secretmediabot/internal/secretcrypto"
 	"github.com/idan/secretmediabot/internal/service"
 	"github.com/idan/secretmediabot/internal/telegram"
 )
@@ -67,15 +68,45 @@ func (h *Handler) sendDelivery(
 		if delivery.Content.Media == nil {
 			return 0, errors.New("reserved media delivery has no media reference")
 		}
-		return h.telegram.SendEphemeralMedia(ctx, telegram.SendEphemeralMediaRequest{
+		ephemeralID, err := h.telegram.SendEphemeralMedia(ctx, telegram.SendEphemeralMediaRequest{
 			ChatID: delivery.Whisper.SourceChatID, MessageThreadID: delivery.Whisper.SourceThreadID,
 			ReceiverUserID: recipientID, CallbackQueryID: delivery.CallbackQueryID,
 			Type: delivery.Content.Media.Type, FileID: delivery.Content.Media.TelegramFileID,
 			Caption: string(delivery.Content.Caption), ProtectContent: delivery.Whisper.ProtectContent,
 		})
+		if err == nil {
+			return ephemeralID, nil
+		}
+		// A permanently dead file_id (revoked resend) falls back to uploading
+		// the retained decrypted bytes. Transient errors retry normally.
+		if !telegram.IsPermanent(err) {
+			return 0, err
+		}
+		return h.sendDeliveryFallback(ctx, delivery, recipientID)
 	default:
 		return 0, errors.New("reserved delivery has unsupported payload kind")
 	}
+}
+
+func (h *Handler) sendDeliveryFallback(
+	ctx context.Context,
+	delivery service.OpenDelivery,
+	recipientID int64,
+) (int64, error) {
+	data, mediaType, contentType, err := h.service.WhisperMediaFallback(ctx, delivery.Whisper.ID)
+	if err != nil {
+		return 0, err
+	}
+	defer secretcrypto.Zero(data)
+	if int64(len(data)) != delivery.Content.Media.PlaintextSize {
+		return 0, errors.New("retained media size mismatch")
+	}
+	return h.telegram.SendEphemeralMediaUpload(ctx, telegram.SendEphemeralMediaUploadRequest{
+		ChatID: delivery.Whisper.SourceChatID, MessageThreadID: delivery.Whisper.SourceThreadID,
+		ReceiverUserID: recipientID, CallbackQueryID: delivery.CallbackQueryID,
+		Type: mediaType, Data: data, ContentType: contentType,
+		Caption: string(delivery.Content.Caption), ProtectContent: delivery.Whisper.ProtectContent,
+	})
 }
 
 func (h *Handler) completeOpen(ctx context.Context, delivery service.OpenDelivery, ephemeralID int64) error {
@@ -100,8 +131,9 @@ func (h *Handler) answerCallback(ctx context.Context, id, text string, alert boo
 	err := h.telegram.AnswerCallbackQuery(answerCtx, telegram.AnswerCallbackQueryRequest{
 		CallbackQueryID: id, Text: text, ShowAlert: alert, CacheTime: 0,
 	})
-	var apiErr *telegram.APIError
-	if errors.As(err, &apiErr) && apiErr.ErrorCode >= 400 && apiErr.ErrorCode < 500 && apiErr.ErrorCode != 429 {
+	// A stale or unknown callback query is already handled server-side; no
+	// need to surface it to the user.
+	if telegram.IsPermanent(err) {
 		return nil
 	}
 	return err

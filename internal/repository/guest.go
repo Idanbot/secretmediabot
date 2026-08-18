@@ -83,6 +83,14 @@ type GuestOpenReservation struct {
 	Content GuestDeliveryContent
 }
 
+// GuestMediaBlob pairs a guest request's stored encrypted media payload with
+// the request's media metadata for the re-upload fallback path.
+type GuestMediaBlob struct {
+	RequestID uuid.UUID
+	MediaType domain.MediaType
+	Stored    StoredEncryptedPayload
+}
+
 type GuestPrivateDeleteJob struct {
 	ID            int64
 	RequestID     *uuid.UUID
@@ -99,6 +107,13 @@ type GuestCreateParams struct {
 	Sender  domain.User
 	Chat    *domain.Chat
 	Now     time.Time
+	// MaxActivePerSender bounds concurrently active requests (awaiting,
+	// ingesting, or ready). Zero disables the cap.
+	MaxActivePerSender int
+	// RecentSince and MaxRecentPerSender bound new-request creation per hour.
+	// Zero disables the cap.
+	RecentSince       time.Time
+	MaxRecentPerSender int
 }
 
 type GuestClaimTargetParams struct {
@@ -243,6 +258,10 @@ type guestPrivateDeleteJobRow struct {
 
 func (guestPrivateDeleteJobRow) TableName() string { return "guest_private_delete_jobs" }
 
+// guestAdvisoryLockNamespace separates the guest creation lock from the draft
+// lock space while still serializing per sender.
+const guestAdvisoryLockNamespace = int64(917_501_000_000_000)
+
 func (s *Store) CreateGuestRequest(ctx context.Context, params GuestCreateParams) (GuestRequest, error) {
 	db, err := s.withContext(ctx)
 	if err != nil {
@@ -267,6 +286,74 @@ func (s *Store) CreateGuestRequest(ctx context.Context, params GuestCreateParams
 	}
 	row := guestRequestRowFromDomain(request)
 	err = db.Transaction(func(tx *gorm.DB) error {
+		// Serialize creation per sender so the active/hourly quotas below are
+		// enforced transactionally, mirroring the draft path.
+		if err := tx.Exec("SELECT pg_advisory_xact_lock(?)", guestAdvisoryLockNamespace+request.SenderID).Error; err != nil {
+			return err
+		}
+		var active []guestRequestRow
+		if err := tx.Where("sender_id = ? AND state IN (?, ?, ?) AND expires_at > ?", request.SenderID,
+			GuestStateAwaitingSecret, GuestStateIngestingSecret, GuestStateReady, now).
+			Order("created_at DESC, id DESC").Find(&active).Error; err != nil {
+			return err
+		}
+		for _, existing := range active {
+			if existing.State == GuestStateAwaitingSecret && sameGuestTarget(existing, request) {
+				// The sender re-typed the same target (inline queries fire on
+				// nearly every keystroke). Reuse the pending request instead of
+				// creating a row per keystroke; refresh the query IDs so the
+				// envelope keeps answering the current query.
+				updates := map[string]any{"expires_at": request.ExpiresAt, "updated_at": now}
+				if request.GuestQueryID != "" {
+					updates["guest_query_id"] = request.GuestQueryID
+				}
+				if request.InlineQueryID != "" {
+					updates["inline_query_id"] = request.InlineQueryID
+				}
+				if err := tx.Model(&guestRequestRow{}).Where("id = ?", existing.ID).Updates(updates).Error; err != nil {
+					return err
+				}
+				row = existing
+				row.ExpiresAt = request.ExpiresAt
+				row.UpdatedAt = now
+				if request.GuestQueryID != "" {
+					row.GuestQueryID = request.GuestQueryID
+				}
+				if request.InlineQueryID != "" {
+					row.InlineQueryID = request.InlineQueryID
+				}
+				return nil
+			}
+		}
+		for _, existing := range active {
+			if existing.State != GuestStateAwaitingSecret {
+				// A secret is being ingested or is already waiting for the
+				// target: the sender must finish or cancel it first.
+				return fmt.Errorf("%w: sender %d has an active guest request", ErrGuestActiveLimit, request.SenderID)
+			}
+		}
+		if params.MaxActivePerSender > 0 && len(active)+1 > params.MaxActivePerSender {
+			return fmt.Errorf("%w: sender %d has %d active guest requests", ErrGuestActiveLimit, request.SenderID, len(active))
+		}
+		if params.MaxRecentPerSender > 0 && !params.RecentSince.IsZero() {
+			var recent int64
+			if err := tx.Model(&guestRequestRow{}).
+				Where("sender_id = ? AND created_at > ?", request.SenderID, params.RecentSince).
+				Count(&recent).Error; err != nil {
+				return err
+			}
+			if int(recent) >= params.MaxRecentPerSender {
+				return fmt.Errorf("%w: sender %d created %d guest requests since %s",
+					ErrGuestRateLimit, request.SenderID, recent, params.RecentSince.Format(time.RFC3339))
+			}
+		}
+		// Pending composer requests awaiting a different target are superseded
+		// by the newest one; they never contained a secret.
+		if err := tx.Model(&guestRequestRow{}).
+			Where("sender_id = ? AND state = ? AND expires_at > ?", request.SenderID, GuestStateAwaitingSecret, now).
+			Updates(map[string]any{"state": GuestStateCancelled, "updated_at": now}).Error; err != nil {
+			return err
+		}
 		if err := upsertUser(tx, params.Sender, now); err != nil {
 			return err
 		}
@@ -286,6 +373,13 @@ func (s *Store) CreateGuestRequest(ctx context.Context, params GuestCreateParams
 		return GuestRequest{}, translateError(err)
 	}
 	return row.toGuestRequest(), nil
+}
+
+func sameGuestTarget(row guestRequestRow, request GuestRequest) bool {
+	if request.TargetUserID != nil {
+		return row.TargetUserID != nil && *row.TargetUserID == *request.TargetUserID
+	}
+	return row.TargetUserID == nil && normalizeUsername(request.TargetUsername) == normalizeUsername(row.TargetUsername)
 }
 
 func (s *Store) FindGuestRequestByTokenHash(ctx context.Context, tokenHash []byte) (GuestRequest, error) {
@@ -343,7 +437,11 @@ func (s *Store) ClaimGuestTarget(ctx context.Context, params GuestClaimTargetPar
 		if row.TargetUserID != nil && *row.TargetUserID != params.User.TelegramUserID {
 			return ErrUnauthorized
 		}
-		if row.TargetUsername != "" && normalizeUsername(params.User.Username) != normalizeUsername(row.TargetUsername) {
+		// Usernames are mutable lookup hints. Once the numeric target ID is
+		// bound, it is authoritative: re-verifying the username would lock out
+		// a legitimate target who renamed after claiming.
+		if row.TargetUserID == nil && row.TargetUsername != "" &&
+			normalizeUsername(params.User.Username) != normalizeUsername(row.TargetUsername) {
 			return ErrUnauthorized
 		}
 		if row.SenderID == params.User.TelegramUserID {
@@ -493,16 +591,27 @@ func (s *Store) ClaimGuestOpen(ctx context.Context, params GuestClaimOpenParams)
 		if row.TargetUserID != nil && *row.TargetUserID != params.User.TelegramUserID {
 			return ErrUnauthorized
 		}
-		if row.TargetUsername != "" && normalizeUsername(params.User.Username) != normalizeUsername(row.TargetUsername) {
+		// As with target claims: once the numeric target ID is bound the
+		// mutable username must not re-gate the open.
+		if row.TargetUserID == nil && row.TargetUsername != "" &&
+			normalizeUsername(params.User.Username) != normalizeUsername(row.TargetUsername) {
 			return ErrUnauthorized
 		}
 		if row.State == GuestStateOpened {
 			return ErrAlreadyOpened
 		}
-		if row.State != GuestStateReady {
-			if row.State == GuestStateAwaitingSecret || row.State == GuestStateIngestingSecret {
-				return ErrNotActive
+		switch row.State {
+		case GuestStateAwaitingSecret, GuestStateIngestingSecret:
+			return ErrNotActive
+		case GuestStateOpening:
+			if row.OpeningLeaseUntil != nil && row.OpeningLeaseUntil.After(now) {
+				return ErrGuestOpeningInProgress
 			}
+			// An expired opening lease means the previous attempt crashed
+			// before completing. Take over the reservation immediately
+			// instead of waiting for the cleanup sweep.
+		case GuestStateReady:
+		default:
 			return ErrConflict
 		}
 		if err := upsertUser(tx, params.User, now); err != nil {
@@ -512,7 +621,9 @@ func (s *Store) ClaimGuestOpen(ctx context.Context, params GuestClaimOpenParams)
 			"target_user_id": params.User.TelegramUserID, "target_claimed_at": now,
 			"state": GuestStateOpening, "opening_reserved_at": now, "opening_lease_until": lease, "updated_at": now,
 		}
-		if err := tx.Model(&guestRequestRow{}).Where("id = ? AND state = ?", row.ID, GuestStateReady).Updates(updates).Error; err != nil {
+		if err := tx.Model(&guestRequestRow{}).
+			Where("id = ? AND state IN (?, ?)", row.ID, GuestStateReady, GuestStateOpening).
+			Updates(updates).Error; err != nil {
 			return translateError(err)
 		}
 		row.TargetUserID = cloneInt64Pointer(&params.User.TelegramUserID)
@@ -605,13 +716,13 @@ func (s *Store) MarkGuestEnvelope(ctx context.Context, tokenHash []byte, inlineM
 	return nil
 }
 
-func (s *Store) CancelGuestRequest(ctx context.Context, params CancelGuestParams) error {
+func (s *Store) CancelGuestRequest(ctx context.Context, params CancelGuestParams) (int, error) {
 	db, err := s.withContext(ctx)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if params.SenderID <= 0 {
-		return fmt.Errorf("%w: guest sender must be positive", ErrInvalidInput)
+		return 0, fmt.Errorf("%w: guest sender must be positive", ErrInvalidInput)
 	}
 	now := nowOr(params.Now)
 	result := db.Model(&guestRequestRow{}).
@@ -619,12 +730,45 @@ func (s *Store) CancelGuestRequest(ctx context.Context, params CancelGuestParams
 			GuestStateAwaitingSecret, GuestStateIngestingSecret, GuestStateReady, now).
 		Updates(map[string]any{"state": GuestStateCancelled, "ingest_lease_until": nil, "opening_lease_until": nil, "updated_at": now})
 	if result.Error != nil {
-		return translateError(result.Error)
+		return 0, translateError(result.Error)
 	}
-	if result.RowsAffected != 1 {
-		return ErrNotFound
+	if result.RowsAffected == 0 {
+		return 0, ErrNotFound
 	}
-	return nil
+	// All of a sender's active requests are cancelled together; reporting the
+	// count keeps the caller honest about what happened.
+	return int(result.RowsAffected), nil
+}
+
+func (s *Store) FindGuestMediaPayload(ctx context.Context, requestID uuid.UUID) (GuestMediaBlob, error) {
+	db, err := s.withContext(ctx)
+	if err != nil {
+		return GuestMediaBlob{}, err
+	}
+	if requestID == uuid.Nil {
+		return GuestMediaBlob{}, fmt.Errorf("%w: guest request ID is required", ErrInvalidInput)
+	}
+	var blob GuestMediaBlob
+	err = db.Transaction(func(tx *gorm.DB) error {
+		var request guestRequestRow
+		if err := tx.Select("id", "media_type").
+			Where("id = ?", requestID).Take(&request).Error; err != nil {
+			return translateError(err)
+		}
+		if request.MediaType == nil {
+			return fmt.Errorf("%w: guest request has no media", ErrConflict)
+		}
+		var row guestPayloadRow
+		if err := tx.Where("request_id = ? AND purpose = 'media'", requestID).Take(&row).Error; err != nil {
+			return translateError(err)
+		}
+		blob = GuestMediaBlob{RequestID: requestID, MediaType: domain.MediaType(*request.MediaType), Stored: row.toStored()}
+		return nil
+	})
+	if err != nil {
+		return GuestMediaBlob{}, err
+	}
+	return blob, nil
 }
 
 func (s *Store) ClaimDueGuestDelete(ctx context.Context, params ClaimGuestDeleteParams) (GuestPrivateDeleteJob, error) {
@@ -669,9 +813,10 @@ func (s *Store) MarkGuestDeleted(ctx context.Context, params FinishGuestDeletePa
 		return err
 	}
 	now := nowOr(params.Now)
+	terminalCode := safeErrorCode(params.ErrorCode)
 	result := db.Model(&guestPrivateDeleteJobRow{}).
 		Where("id = ? AND deleted_at IS NULL AND lease_until = ?", params.JobID, params.ExpectedLeaseUntil.UTC()).
-		Updates(map[string]any{"deleted_at": now, "lease_until": nil, "last_error": nil, "updated_at": now})
+		Updates(map[string]any{"deleted_at": now, "lease_until": nil, "last_error": terminalCode, "updated_at": now})
 	if result.Error != nil {
 		return translateError(result.Error)
 	}
