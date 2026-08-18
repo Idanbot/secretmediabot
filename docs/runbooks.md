@@ -69,3 +69,32 @@ To rotate the AES-256-GCM media encryption key without invalidating existing sto
 1. Rotate `MEDIA_ENCRYPTION_KEY` following the Key Rotation Procedure above.
 2. Invalidate all active drafts and pending requests via database cleanup or operator intervention.
 3. Check `owner_audit_events` and database logs for unauthorized access.
+
+---
+
+## 4. Observability & Monitoring
+
+Secret Media Bot includes a pre-configured Prometheus and Grafana stack in `compose.yaml`:
+
+### Starting the Monitoring Stack
+```bash
+docker compose --profile monitoring up -d
+```
+
+### Accessing Dashboards
+- **Grafana**: [http://localhost:3000](http://localhost:3000) (default credentials: `admin` / `admin`).
+  - Pre-provisioned dashboard: **Secret Media Bot Overview** (tracks update rates, API latency, delete job lag, and errors).
+- **Prometheus**: [http://localhost:9090](http://localhost:9090).
+- **Bot Raw Metrics**: `curl http://localhost:8080/metrics`
+
+### Metric Reference
+| Metric | Type | Labels | Description |
+| --- | --- | --- | --- |
+| `updates_processed_total` | Counter | `kind` | Acknowledged Telegram updates by type (`message`, `callback_query`, etc.). |
+| `updates_failed_total` | Counter | `error_class` | Processing failures by error classification. |
+| `updates_dead_letter_total` | Counter | None | Updates skipped after exceeding retry budget. |
+| `update_handler_panics_total` | Counter | None | Recovered panics in update handlers. |
+| `telegram_api_requests_total` | Counter | `method`, `outcome` | Outgoing Telegram API calls and outcomes. |
+| `telegram_api_request_duration_microseconds_total` | Counter | `method` | Cumulative duration of Telegram API calls. |
+| `delete_jobs_total` | Counter | `queue`, `outcome` | Ephemeral message deletion job results. |
+| `telegram_poll_failures_total` | Counter | `error_class` | Failed `getUpdates` polling requests. |
