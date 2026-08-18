@@ -138,4 +138,3 @@ func TestCreateGuestInlineSecret(t *testing.T) {
 		t.Fatalf("expected guest parameter prefix, got %q", session.Parameter)
 	}
 }
-

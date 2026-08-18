@@ -93,7 +93,7 @@ func validUsername(value string) bool {
 		return false
 	}
 	first := value[0]
-	if !((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z')) {
+	if (first < 'a' || first > 'z') && (first < 'A' || first > 'Z') {
 		return false
 	}
 	for i := 0; i < len(value); i++ {

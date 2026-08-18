@@ -216,4 +216,3 @@ func TestInlineQueryDirectSecretMessage(t *testing.T) {
 		t.Fatalf("expected button URL to contain guest token, got %q", button.URL)
 	}
 }
-

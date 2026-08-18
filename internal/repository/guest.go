@@ -103,11 +103,11 @@ type GuestPrivateDeleteJob struct {
 }
 
 type GuestCreateParams struct {
-	Request            GuestRequest
-	Sender             domain.User
-	Chat               *domain.Chat
-	TextPayload        *GuestPayload
-	Now                time.Time
+	Request     GuestRequest
+	Sender      domain.User
+	Chat        *domain.Chat
+	TextPayload *GuestPayload
+	Now         time.Time
 	// MaxActivePerSender bounds concurrently active requests (awaiting,
 	// ingesting, or ready). Zero disables the cap.
 	MaxActivePerSender int

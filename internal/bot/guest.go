@@ -228,7 +228,7 @@ func (h *Handler) answerInlineNotice(ctx context.Context, queryID, title, text s
 		InlineQueryID: queryID, CacheTime: 0, IsPersonal: true,
 		Results: []telegram.InlineQueryResultArticle{{
 			Type: "article", ID: "inline-notice", Title: title,
-			Description: text,
+			Description:         text,
 			InputMessageContent: telegram.InputTextMessageContent{MessageText: text},
 		}},
 	})
