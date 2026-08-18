@@ -113,6 +113,9 @@ func (s *Service) CreateGuestRequest(ctx context.Context, params CreateGuestRequ
 	}
 	switch params.Target.Kind {
 	case command.TargetUserID:
+		if params.Target.UserID == params.Sender.TelegramUserID {
+			return GuestSession{}, ErrTargetIsSender
+		}
 		request.TargetUserID = cloneInt64(&params.Target.UserID)
 	case command.TargetUsername:
 		normalized := strings.ToLower(strings.TrimPrefix(params.Target.Username, "@"))
@@ -171,6 +174,9 @@ func (s *Service) CreateGuestInlineSecret(ctx context.Context, params CreateGues
 	}
 	switch params.Target.Kind {
 	case command.TargetUserID:
+		if params.Target.UserID == params.Sender.TelegramUserID {
+			return GuestSession{}, ErrTargetIsSender
+		}
 		request.TargetUserID = cloneInt64(&params.Target.UserID)
 	case command.TargetUsername:
 		normalized := strings.ToLower(strings.TrimPrefix(params.Target.Username, "@"))

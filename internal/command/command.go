@@ -59,6 +59,10 @@ type Target struct {
 
 func ParseTarget(value string) (Target, error) {
 	value = strings.TrimSpace(value)
+	value = strings.Trim(value, "[]<>\"'()")
+	value = strings.TrimPrefix(value, "id:")
+	value = strings.TrimPrefix(value, "ID:")
+	value = strings.TrimSpace(value)
 	if value == "" {
 		return Target{}, ErrInvalidTarget
 	}
@@ -71,16 +75,25 @@ func ParseTarget(value string) (Target, error) {
 	}
 
 	id, err := strconv.ParseInt(value, 10, 64)
-	if err != nil || id <= 0 {
-		return Target{}, ErrInvalidTarget
+	if err == nil && id > 0 {
+		return Target{Kind: TargetUserID, UserID: id}, nil
 	}
-	return Target{Kind: TargetUserID, UserID: id}, nil
+
+	if validUsername(value) {
+		return Target{Kind: TargetUsername, Username: strings.ToLower(value)}, nil
+	}
+
+	return Target{}, ErrInvalidTarget
 }
 
 func validUsername(value string) bool {
-	// Telegram usernames are currently 5-32 ASCII letters, digits, or
-	// underscores. Keeping validation here prevents broad database probes.
+	// Telegram usernames are 5-32 ASCII letters, digits, or underscores,
+	// starting with a letter.
 	if len(value) < 5 || len(value) > 32 {
+		return false
+	}
+	first := value[0]
+	if !((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z')) {
 		return false
 	}
 	for i := 0; i < len(value); i++ {

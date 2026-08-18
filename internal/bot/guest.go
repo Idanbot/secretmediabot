@@ -82,7 +82,7 @@ func (h *Handler) handleInlineQuery(ctx context.Context, query telegram.InlineQu
 		return h.answerInlineHelp(ctx, query.ID)
 	}
 	if query.From.ID <= 0 || query.From.IsBot {
-		return h.answerInlineNotice(ctx, query.ID, "Only human users can create locked secrets.")
+		return h.answerInlineNotice(ctx, query.ID, "⚠️ Unauthorized", "Only human users can create locked secrets.")
 	}
 
 	var (
@@ -95,10 +95,8 @@ func (h *Handler) handleInlineQuery(ctx context.Context, query telegram.InlineQu
 			Sender: domainUser(query.From), Target: target, Text: secretText, InlineQueryID: query.ID,
 		})
 		if err != nil {
-			if text, expected := userMessage(err); expected {
-				return h.answerInlineNotice(ctx, query.ID, text)
-			}
-			return h.answerInlineNotice(ctx, query.ID, "I could not create that locked secret. Try again shortly.")
+			title, desc := inlineNoticeFromError(err)
+			return h.answerInlineNotice(ctx, query.ID, title, desc)
 		}
 		article = h.guestInlineArticle(session, target, secretText, inlineResultID(h.botUsername, query.From.ID, target, secretText))
 	} else {
@@ -106,10 +104,8 @@ func (h *Handler) handleInlineQuery(ctx context.Context, query telegram.InlineQu
 			Sender: domainUser(query.From), Target: target, InlineQueryID: query.ID,
 		})
 		if err != nil {
-			if text, expected := userMessage(err); expected {
-				return h.answerInlineNotice(ctx, query.ID, text)
-			}
-			return h.answerInlineNotice(ctx, query.ID, "I could not create that locked secret. Try again shortly.")
+			title, desc := inlineNoticeFromError(err)
+			return h.answerInlineNotice(ctx, query.ID, title, desc)
 		}
 		article = h.guestArticle(session, target, inlineResultID(h.botUsername, query.From.ID, target, ""))
 	}
@@ -225,17 +221,37 @@ func (h *Handler) answerGuestNotice(ctx context.Context, queryID, text string) e
 	return err
 }
 
-func (h *Handler) answerInlineNotice(ctx context.Context, queryID, text string) error {
+func (h *Handler) answerInlineNotice(ctx context.Context, queryID, title, text string) error {
 	requestCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
 	defer cancel()
 	return h.telegram.AnswerInlineQuery(requestCtx, telegram.AnswerInlineQueryRequest{
 		InlineQueryID: queryID, CacheTime: 0, IsPersonal: true,
 		Results: []telegram.InlineQueryResultArticle{{
-			Type: "article", ID: "inline-error", Title: "Locked secret unavailable",
+			Type: "article", ID: "inline-notice", Title: title,
 			Description: text,
 			InputMessageContent: telegram.InputTextMessageContent{MessageText: text},
 		}},
 	})
+}
+
+func inlineNoticeFromError(err error) (string, string) {
+	switch {
+	case errors.Is(err, service.ErrTargetIsSender):
+		return "⚠️ Cannot send secret to yourself", "Target another user's @username or numeric Telegram ID."
+	case errors.Is(err, service.ErrGuestActiveLimit):
+		return "⚠️ Active secret limit reached", "You have open whispers waiting. Use /cancel in private chat before creating more."
+	case errors.Is(err, service.ErrGuestRateLimit):
+		return "⚠️ Hourly limit reached", "You have reached the hourly whisper limit. Try again in a few minutes."
+	case errors.Is(err, service.ErrTextTooLong):
+		return "⚠️ Secret text is too long", "Secret text is limited to 4096 characters."
+	case errors.Is(err, service.ErrTargetRequired), errors.Is(err, command.ErrInvalidTarget):
+		return "🔒 Send Secret Whisper", "Type: @username [secret message] or 123456789 [secret message]"
+	default:
+		if text, expected := userMessage(err); expected {
+			return "⚠️ " + text, text
+		}
+		return "🔒 Send Secret Whisper", "Type: @username [secret message] or 123456789 [secret message]"
+	}
 }
 
 func parseGuestTarget(text, botUsername string) (command.Target, error) {
