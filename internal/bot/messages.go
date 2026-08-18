@@ -587,10 +587,28 @@ func userMessage(err error) (string, bool) {
 	}
 }
 
-const welcomeText = "Welcome. In a shared group, reply to someone with /whisper or use /whisper @username or /whisper 123456789. I will collect the secret here privately. Use /privacy before sending sensitive content."
+const welcomeText = "Welcome to Secret Whisper Bot 🔒\n\n" +
+	"Two ways to send locked secrets:\n\n" +
+	"1️⃣ Instant Text Whisper (In any chat):\n" +
+	"Type @botusername @recipient your secret message\n" +
+	"Tap the popup to post the locked whisper. The recipient can unlock it immediately.\n\n" +
+	"2️⃣ Media/DM Whisper (Photos, Videos, Voice, Text):\n" +
+	"• Inline: Type @botusername @recipient, post envelope, then tap to add secret privately in DM.\n" +
+	"• Group: Reply to a user with /whisper, then send your secret here.\n\n" +
+	"Use /privacy to review our encryption and privacy model."
 
-const privateHelpText = "Start in a shared group with /whisper. Then send either secret text or one photo, voice note, video, audio file, or document here. Media is limited to %s. Use /cancel to discard an active draft and /privacy for the privacy model."
+const privateHelpText = "Secret Whisper Bot Help 🔒\n\n" +
+	"1️⃣ Instant Text Whisper (Any chat):\n" +
+	"Type in any chat: @botusername @recipient your secret message\n" +
+	"Tap the result to post. Recipient taps to unlock.\n\n" +
+	"2️⃣ Media / DM Whisper:\n" +
+	"Type @botusername @recipient in any chat or use /whisper in a shared group.\n" +
+	"Send your secret photo, voice note, video, or document here (up to %s).\n" +
+	"Use /cancel to discard an active composer draft and /privacy for security details."
 
-const groupHelpText = "Reply to a group member with /whisper, or use /whisper @username or /whisper 123456789. Username/ID targets must have been observed in this same group. Secret content is collected in private chat."
+const groupHelpText = "How to whisper in this group 🔒\n\n" +
+	"1. Reply to someone with /whisper, or use /whisper @username or /whisper 123456789.\n" +
+	"2. The bot will open a private composer with you in DM to collect the secret safely.\n" +
+	"3. Or type inline: @botusername @recipient your secret message to send an instant locked whisper."
 
 const privacyText = "Privacy: secret payloads are encrypted in PostgreSQL and ordinary group members receive only an empty envelope. Content is retained for 30 days by default. One-time means one successful Telegram delivery, not proof that it was read. Ephemeral deletion and protect-content are best effort; screenshots, devices, backups, and Telegram copies may remain."

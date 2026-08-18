@@ -159,10 +159,10 @@ func (h *Handler) guestInlineArticle(session service.GuestSession, target comman
 	}
 	link := composeURL(h.botUsername, session.Parameter)
 	return telegram.InlineQueryResultArticle{
-		Type: "article", ID: resultID, Title: fmt.Sprintf("🔒 Send secret whisper to %s", targetText),
-		Description: fmt.Sprintf("Secret: %q (tap to post locked envelope)", preview),
+		Type: "article", ID: resultID, Title: fmt.Sprintf("🔒 Send instant secret to %s", targetText),
+		Description: fmt.Sprintf("Secret: %q (tap to send locked whisper)", preview),
 		InputMessageContent: telegram.InputTextMessageContent{
-			MessageText: fmt.Sprintf("🔒 Locked secret for %s.\nOnly they can open it.", targetText),
+			MessageText: fmt.Sprintf("🔒 Secret whisper for %s.\nOnly they can unlock and view this secret.", targetText),
 		},
 		ReplyMarkup: &telegram.InlineKeyboardMarkup{InlineKeyboard: [][]telegram.InlineKeyboardButton{{
 			{Text: "🔓 Open Secret", URL: link},
@@ -177,13 +177,13 @@ func (h *Handler) guestArticle(session service.GuestSession, target command.Targ
 	} else if !strings.HasPrefix(targetText, "@") {
 		targetText = "@" + targetText
 	}
-	description := "Tap to post envelope, then add text or media privately in DM."
+	description := "Tap to post envelope, then sender taps button to add secret in DM."
 	link := composeURL(h.botUsername, session.Parameter)
 	return telegram.InlineQueryResultArticle{
-		Type: "article", ID: resultID, Title: fmt.Sprintf("🔒 Locked secret envelope for %s", targetText),
+		Type: "article", ID: resultID, Title: fmt.Sprintf("🔒 Secret envelope for %s (add in DM)", targetText),
 		Description: description,
 		InputMessageContent: telegram.InputTextMessageContent{
-			MessageText: fmt.Sprintf("🔒 Locked secret for %s.\nThe secret content is not posted in this chat.", targetText),
+			MessageText: fmt.Sprintf("🔒 Locked secret envelope for %s.\nSender: click the button below to add your secret privately in DM.\nRecipient: click to open once added.", targetText),
 		},
 		ReplyMarkup: &telegram.InlineKeyboardMarkup{InlineKeyboard: [][]telegram.InlineKeyboardButton{{
 			{Text: "➕ Add or open privately", URL: link},
@@ -196,15 +196,26 @@ func (h *Handler) answerInlineHelp(ctx context.Context, queryID string) error {
 	defer cancel()
 	return h.telegram.AnswerInlineQuery(requestCtx, telegram.AnswerInlineQueryRequest{
 		InlineQueryID: queryID, CacheTime: 0, IsPersonal: true,
-		Results: []telegram.InlineQueryResultArticle{{
-			Type:        "article",
-			ID:          "inline-help",
-			Title:       "🔒 Secret Whisper",
-			Description: "Type: @username <secret message> or 123456789 <secret message>",
-			InputMessageContent: telegram.InputTextMessageContent{
-				MessageText: "To send a secret whisper, type in any chat:\n@" + h.botUsername + " @username your secret message",
+		Results: []telegram.InlineQueryResultArticle{
+			{
+				Type:        "article",
+				ID:          "inline-help-instant",
+				Title:       "1️⃣ Instant Text Whisper (1 Step)",
+				Description: "@" + h.botUsername + " @recipient <your secret message>",
+				InputMessageContent: telegram.InputTextMessageContent{
+					MessageText: "To send an instant secret whisper:\n@" + h.botUsername + " @recipient your secret message",
+				},
 			},
-		}},
+			{
+				Type:        "article",
+				ID:          "inline-help-media",
+				Title:       "2️⃣ Media/DM Whisper (2 Steps)",
+				Description: "@" + h.botUsername + " @recipient (tap to post envelope, then add photo/media in DM)",
+				InputMessageContent: telegram.InputTextMessageContent{
+					MessageText: "To send a media whisper:\n@" + h.botUsername + " @recipient",
+				},
+			},
+		},
 	})
 }
 

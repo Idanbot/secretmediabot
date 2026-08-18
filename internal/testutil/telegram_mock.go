@@ -28,11 +28,12 @@ type TelegramMockServer struct {
 	messageID atomic.Int64
 	calls     []RecordedCall
 
-	SentMessages       []telegram.SendMessageRequest
-	AnsweredCallbacks  []telegram.AnswerCallbackQueryRequest
-	DeletedMessages    []telegram.DeleteMessageRequest
-	DeletedEphemerals  []telegram.DeleteEphemeralMessageRequest
-	CustomFilePayloads map[string][]byte
+	SentMessages          []telegram.SendMessageRequest
+	AnsweredCallbacks     []telegram.AnswerCallbackQueryRequest
+	AnsweredInlineQueries []telegram.AnswerInlineQueryRequest
+	DeletedMessages       []telegram.DeleteMessageRequest
+	DeletedEphemerals     []telegram.DeleteEphemeralMessageRequest
+	CustomFilePayloads    map[string][]byte
 }
 
 func NewTelegramMockServer(botUsername string) *TelegramMockServer {
@@ -152,6 +153,18 @@ func NewTelegramMockServer(botUsername string) *TelegramMockServer {
 				"result": true,
 			})
 
+		case "answerInlineQuery":
+			var req telegram.AnswerInlineQueryRequest
+			_ = json.Unmarshal(body, &req)
+			mock.mu.Lock()
+			mock.AnsweredInlineQueries = append(mock.AnsweredInlineQueries, req)
+			mock.mu.Unlock()
+
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok":     true,
+				"result": true,
+			})
+
 		case "deleteMessage":
 			var req telegram.DeleteMessageRequest
 			_ = json.Unmarshal(body, &req)
@@ -204,4 +217,12 @@ func NewTelegramMockServer(botUsername string) *TelegramMockServer {
 
 func (m *TelegramMockServer) Close() {
 	m.Server.Close()
+}
+
+func (m *TelegramMockServer) RecordedCalls() []RecordedCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	copied := make([]RecordedCall, len(m.calls))
+	copy(copied, m.calls)
+	return copied
 }
