@@ -17,6 +17,12 @@ services:
     init: true
     env_file:
       - ${ENV_FILE:-.env}
+    environment:
+      APP_VERSION: ${VERSION:-}
+      GIT_COMMIT: ${COMMIT:-}
+      COMMIT_MESSAGE: ${COMMIT_MESSAGE:-}
+      BUILD_TIME: ${BUILD_TIME:-}
+      CI_RUN_NUMBER: ${CI_RUN_NUMBER:-}
     depends_on:
       postgres:
         condition: service_healthy

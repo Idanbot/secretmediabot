@@ -1104,7 +1104,7 @@ func TestOwnerListChunksLargeMetadataResponse(t *testing.T) {
 	if !strings.Contains(combined.String(), whispers[0].ID.String()) || !strings.Contains(combined.String(), whispers[len(whispers)-1].ID.String()) {
 		t.Fatal("chunked owner list omitted metadata")
 	}
-	if !strings.Contains(combined.String(), "Next page: /owner_list 50 150") {
+	if !strings.Contains(combined.String(), "/owner_list 50 150") {
 		t.Fatal("full owner list page omitted next-page hint")
 	}
 }

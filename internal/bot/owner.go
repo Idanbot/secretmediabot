@@ -43,55 +43,60 @@ func (h *Handler) handleOwnerCommand(
 
 func (h *Handler) ownerMenu(ctx context.Context, message telegram.Message, ownerID int64) error {
 	ephemeral := h.service.GetEphemeralDeleteAfter()
-	ephemeralText := "Disabled (secrets persist until global retention expires)"
+	ephemeralText := "⚪ Disabled (secrets persist until global retention expires)"
 	if ephemeral > 0 {
-		ephemeralText = fmt.Sprintf("Enabled (auto-deletes %s after open)", ephemeral)
+		ephemeralText = fmt.Sprintf("🔴 Enabled (auto-deletes %s after open)", ephemeral)
 	}
 
-	buildInfoText := ""
-	if h.buildInfo.Version != "" || h.buildInfo.Commit != "" || h.buildInfo.CIRunNumber != "" {
-		version := h.buildInfo.Version
-		if version == "" {
-			version = "dev"
-		}
-		commit := h.buildInfo.Commit
-		if len(commit) > 7 {
-			commit = commit[:7]
-		}
-		if commit == "" {
-			commit = "unknown"
-		}
-		ciRun := h.buildInfo.CIRunNumber
-		if ciRun == "" {
-			ciRun = "local"
-		}
-		buildTime := h.buildInfo.BuildTime
-		if buildTime == "" {
-			buildTime = "unknown"
-		}
-		msg := h.buildInfo.CommitMessage
-		if msg == "" {
-			msg = "unknown"
-		}
+	var buildSection strings.Builder
+	buildSection.WriteString("🚀 Build & Deployment:")
 
-		buildInfoText = fmt.Sprintf("\n\n🚀 Build & Deployment:\n• Version: %s\n• CI Run: #%s\n• Commit: %s\n• Message: %s\n• Built: %s\n",
-			version, ciRun, commit, msg, buildTime)
+	version := h.buildInfo.Version
+	if version == "" {
+		version = "dev"
+	}
+	buildSection.WriteString(fmt.Sprintf("\n• Version: %s", version))
+
+	if h.buildInfo.CIRunNumber != "" && h.buildInfo.CIRunNumber != "local" {
+		buildSection.WriteString(fmt.Sprintf("\n• CI Run: #%s", h.buildInfo.CIRunNumber))
+	} else {
+		buildSection.WriteString("\n• Environment: Local / Development")
+	}
+
+	commit := h.buildInfo.Commit
+	if len(commit) > 7 {
+		commit = commit[:7]
+	}
+	if commit != "" && commit != "unknown" {
+		buildSection.WriteString(fmt.Sprintf("\n• Commit: %s", commit))
+	}
+
+	if h.buildInfo.CommitMessage != "" && h.buildInfo.CommitMessage != "unknown" {
+		buildSection.WriteString(fmt.Sprintf("\n• Message: %s", h.buildInfo.CommitMessage))
+	}
+
+	if h.buildInfo.BuildTime != "" && h.buildInfo.BuildTime != "unknown" {
+		buildSection.WriteString(fmt.Sprintf("\n• Built: %s", h.buildInfo.BuildTime))
 	}
 
 	text := fmt.Sprintf(`🛡️ Secret Media Bot — Operator Menu
+
 %s
-⏱️ Self-Destruction on Open: %s
-• /owner_ephemeral off — Turn self-destruction off
-• /owner_ephemeral 30s — Auto-delete 30s after open
-• /owner_ephemeral 1m — Auto-delete 1m after open
-• /owner_ephemeral 5m — Auto-delete 5m after open
-• /owner_ephemeral <duration> — Custom duration (e.g. 10m)
+
+⏱️ Self-Destruction on Open:
+• Status: %s
+• Quick Controls:
+  /owner_ephemeral off — Turn off self-destruction
+  /owner_ephemeral 30s — Auto-delete 30s after open
+  /owner_ephemeral 1m — Auto-delete 1m after open
+  /owner_ephemeral 5m — Auto-delete 5m after open
+  /owner_ephemeral <duration> — Set custom delay (e.g. 10m)
 
 📋 Auditing & Whisper Management:
-• /owner_list [limit] [offset] — List recent whispers (metadata only)
+• /owner_list — Browse retained whispers (tap-to-inspect)
 • /owner_open <whisper-uuid> — Review decrypted whisper payload
 • /owner_delete <whisper-uuid> — Hard-delete whisper and payload
-• /owner_retain <whisper-uuid> <duration> — Adjust retention window`, buildInfoText, ephemeralText)
+• /owner_retain <whisper-uuid> <duration> — Adjust retention window`, buildSection.String(), ephemeralText)
 
 	return h.sendReply(ctx, message, text, nil)
 }
@@ -149,17 +154,67 @@ func (h *Handler) ownerList(ctx context.Context, message telegram.Message, owner
 		return h.sendReply(ctx, message, "No retained whispers.", nil)
 	}
 	var output strings.Builder
-	output.WriteString("Retained whispers (metadata only):\n")
-	for _, whisper := range whispers {
-		fmt.Fprintf(&output, "\n%s | %s/%s | %s | sender %d → recipient %d | created %s",
-			whisper.ID, whisper.Status, whisper.PublishState, whisper.Content.Kind,
-			whisper.SenderID, whisper.RecipientID, whisper.CreatedAt.UTC().Format(time.RFC3339),
-		)
+	page := (offset / limit) + 1
+	fmt.Fprintf(&output, "📋 Retained Whispers (Page %d, showing %d items):\n", page, len(whispers))
+	for i, whisper := range whispers {
+		fmt.Fprintf(&output, "\n━━━━━━━━━━━━━━━━━━━\n")
+		fmt.Fprintf(&output, "📦 [%d] ID: %s\n", offset+i+1, whisper.ID)
+		fmt.Fprintf(&output, "• Type: %s\n", formatPayloadKind(whisper.Content.Kind))
+		fmt.Fprintf(&output, "• Status: %s\n", formatWhisperStatus(whisper.Status, whisper.PublishState))
+		fmt.Fprintf(&output, "• Parties: Sender %d ➔ Recipient %d\n", whisper.SenderID, whisper.RecipientID)
+		fmt.Fprintf(&output, "• Created: %s\n", whisper.CreatedAt.UTC().Format("2006-01-02 15:04:05 UTC"))
+		if !whisper.ExpiresAt.IsZero() {
+			fmt.Fprintf(&output, "• Expires: %s\n", whisper.ExpiresAt.UTC().Format("2006-01-02 15:04:05 UTC"))
+		}
+		fmt.Fprintf(&output, "• Actions:\n  /owner_open %s\n  /owner_delete %s\n  /owner_retain %s 720h",
+			whisper.ID, whisper.ID, whisper.ID)
+	}
+	var pagination []string
+	if offset > 0 {
+		prevOffset := offset - limit
+		if prevOffset < 0 {
+			prevOffset = 0
+		}
+		pagination = append(pagination, fmt.Sprintf("⬅️ Prev: /owner_list %d %d", limit, prevOffset))
 	}
 	if len(whispers) == limit {
-		fmt.Fprintf(&output, "\n\nNext page: /owner_list %d %d", limit, offset+limit)
+		pagination = append(pagination, fmt.Sprintf("➡️ Next: /owner_list %d %d", limit, offset+limit))
+	}
+	if len(pagination) > 0 {
+		fmt.Fprintf(&output, "\n\n━━━━━━━━━━━━━━━━━━━\n%s", strings.Join(pagination, " | "))
 	}
 	return h.sendLongReply(ctx, message, output.String())
+}
+
+func formatWhisperStatus(status domain.WhisperStatus, pub domain.PublishState) string {
+	switch status {
+	case domain.WhisperActive:
+		if pub == domain.PublishPublished {
+			return "🟢 Active (Published)"
+		}
+		return "🟢 Active"
+	case domain.WhisperOpening:
+		return "🟡 Opening"
+	case domain.WhisperOpened:
+		return "📬 Opened"
+	case domain.WhisperExpired:
+		return "⌛ Expired"
+	case domain.WhisperRevoked:
+		return "🚫 Revoked"
+	default:
+		return string(status)
+	}
+}
+
+func formatPayloadKind(kind domain.PayloadKind) string {
+	switch kind {
+	case domain.PayloadText:
+		return "📝 Text"
+	case domain.PayloadMedia:
+		return "🖼️ / 📁 Media"
+	default:
+		return string(kind)
+	}
 }
 
 func (h *Handler) ownerOpen(ctx context.Context, message telegram.Message, ownerID int64, args string) error {

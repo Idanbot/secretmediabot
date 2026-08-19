@@ -8,7 +8,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -31,6 +33,86 @@ var (
 	buildTime     = "unknown"
 	ciRunNumber   = "local"
 )
+
+func resolveBuildInfo() bot.BuildInfo {
+	v := version
+	c := commit
+	msg := commitMessage
+	bt := buildTime
+	ci := ciRunNumber
+
+	// 1. Environment variable overrides (from .env or compose)
+	if env := os.Getenv("APP_VERSION"); env != "" && (v == "dev" || v == "") {
+		v = env
+	}
+	if env := os.Getenv("BOT_VERSION"); env != "" && (v == "dev" || v == "") {
+		v = env
+	}
+	if env := os.Getenv("GIT_COMMIT"); env != "" && (c == "unknown" || c == "") {
+		c = env
+	}
+	if env := os.Getenv("COMMIT_MESSAGE"); env != "" && (msg == "unknown" || msg == "") {
+		msg = env
+	}
+	if env := os.Getenv("BUILD_TIME"); env != "" && (bt == "unknown" || bt == "") {
+		bt = env
+	}
+	if env := os.Getenv("CI_RUN_NUMBER"); env != "" && (ci == "local" || ci == "") {
+		ci = env
+	}
+
+	// 2. Go runtime debug buildinfo
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if (v == "dev" || v == "") && info.Main.Version != "" && info.Main.Version != "(devel)" {
+			v = info.Main.Version
+		}
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				if c == "unknown" || c == "" {
+					c = setting.Value
+				}
+			case "vcs.time":
+				if bt == "unknown" || bt == "" {
+					bt = setting.Value
+				}
+			}
+		}
+	}
+
+	// 3. Local git working tree fallback (if binary was built or run in a repo checkout)
+	if c == "unknown" || c == "" {
+		if out, err := exec.Command("git", "rev-parse", "HEAD").Output(); err == nil {
+			c = strings.TrimSpace(string(out))
+		}
+	}
+	if msg == "unknown" || msg == "" {
+		if out, err := exec.Command("git", "log", "-1", "--pretty=%s").Output(); err == nil {
+			msg = strings.TrimSpace(string(out))
+		}
+	}
+	if bt == "unknown" || bt == "" {
+		if out, err := exec.Command("git", "log", "-1", "--pretty=%cI").Output(); err == nil {
+			bt = strings.TrimSpace(string(out))
+		}
+	}
+	if v == "dev" || v == "" {
+		if out, err := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD").Output(); err == nil {
+			branch := strings.TrimSpace(string(out))
+			if branch != "" && branch != "HEAD" {
+				v = branch
+			}
+		}
+	}
+
+	return bot.BuildInfo{
+		Version:       v,
+		Commit:        c,
+		CommitMessage: msg,
+		BuildTime:     bt,
+		CIRunNumber:   ci,
+	}
+}
 
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "healthcheck" {
@@ -215,13 +297,7 @@ func run(parent context.Context) error {
 		Service: useCases, Telegram: telegramClient, BotUsername: cfg.Telegram.BotUsername,
 		MaxMediaBytes: cfg.Media.MaxBytes, MediaDownloadTimeout: cfg.Media.DownloadTimeout,
 		RequestTimeout: cfg.Telegram.RequestTimeout, Logger: logger,
-		BuildInfo: bot.BuildInfo{
-			Version:       version,
-			Commit:        commit,
-			CommitMessage: commitMessage,
-			BuildTime:     buildTime,
-			CIRunNumber:   ciRunNumber,
-		},
+		BuildInfo: resolveBuildInfo(),
 	})
 	if err != nil {
 		return fmt.Errorf("initialize Telegram handler: %w", err)
