@@ -298,32 +298,34 @@ func (s *Store) CreateGuestRequest(ctx context.Context, params GuestCreateParams
 			Order("created_at DESC, id DESC").Find(&active).Error; err != nil {
 			return err
 		}
-		for _, existing := range active {
-			if existing.State == GuestStateAwaitingSecret && sameGuestTarget(existing, request) {
-				// The sender re-typed the same target (inline queries fire on
-				// nearly every keystroke). Reuse the pending request instead of
-				// creating a row per keystroke; refresh the query IDs so the
-				// envelope keeps answering the current query.
-				updates := map[string]any{"expires_at": request.ExpiresAt, "updated_at": now}
-				if request.GuestQueryID != "" {
-					updates["guest_query_id"] = request.GuestQueryID
+		if request.State == GuestStateAwaitingSecret && params.TextPayload == nil {
+			for _, existing := range active {
+				if existing.State == GuestStateAwaitingSecret && sameGuestTarget(existing, request) {
+					// The sender re-typed the same target (inline queries fire on
+					// nearly every keystroke). Reuse the pending request instead of
+					// creating a row per keystroke; refresh the query IDs so the
+					// envelope keeps answering the current query.
+					updates := map[string]any{"expires_at": request.ExpiresAt, "updated_at": now}
+					if request.GuestQueryID != "" {
+						updates["guest_query_id"] = request.GuestQueryID
+					}
+					if request.InlineQueryID != "" {
+						updates["inline_query_id"] = request.InlineQueryID
+					}
+					if err := tx.Model(&guestRequestRow{}).Where("id = ?", existing.ID).Updates(updates).Error; err != nil {
+						return err
+					}
+					row = existing
+					row.ExpiresAt = request.ExpiresAt
+					row.UpdatedAt = now
+					if request.GuestQueryID != "" {
+						row.GuestQueryID = request.GuestQueryID
+					}
+					if request.InlineQueryID != "" {
+						row.InlineQueryID = request.InlineQueryID
+					}
+					return nil
 				}
-				if request.InlineQueryID != "" {
-					updates["inline_query_id"] = request.InlineQueryID
-				}
-				if err := tx.Model(&guestRequestRow{}).Where("id = ?", existing.ID).Updates(updates).Error; err != nil {
-					return err
-				}
-				row = existing
-				row.ExpiresAt = request.ExpiresAt
-				row.UpdatedAt = now
-				if request.GuestQueryID != "" {
-					row.GuestQueryID = request.GuestQueryID
-				}
-				if request.InlineQueryID != "" {
-					row.InlineQueryID = request.InlineQueryID
-				}
-				return nil
 			}
 		}
 		for _, existing := range active {

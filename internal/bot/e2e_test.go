@@ -1018,9 +1018,21 @@ func TestE2EInlineInstantTextWhisperFlow(t *testing.T) {
 	recipient := telegram.User{ID: 202, FirstName: "Bob", Username: "bobby_user"}
 	intruder := telegram.User{ID: 303, FirstName: "Eve", Username: "eve_user"}
 
-	// Step 1: Alice submits inline query: @secretmediabot @bobby_user The secret code is 998877
+	// Step 1a: Alice types target username first: @bobby_user
 	if err := handler.HandleUpdate(ctx, telegram.Update{
 		UpdateID: 1,
+		InlineQuery: &telegram.InlineQuery{
+			ID:    "inline_q0",
+			From:  sender,
+			Query: "@bobby_user",
+		},
+	}); err != nil {
+		t.Fatalf("HandleUpdate(inline target only) error = %v", err)
+	}
+
+	// Step 1b: Alice continues typing the secret text: @bobby_user The secret code is 998877
+	if err := handler.HandleUpdate(ctx, telegram.Update{
+		UpdateID: 2,
 		InlineQuery: &telegram.InlineQuery{
 			ID:    "inline_q1",
 			From:  sender,
@@ -1030,10 +1042,10 @@ func TestE2EInlineInstantTextWhisperFlow(t *testing.T) {
 		t.Fatalf("HandleUpdate(inline instant text) error = %v", err)
 	}
 
-	if len(mockServer.AnsweredInlineQueries) == 0 {
-		t.Fatal("expected AnswerInlineQuery to be called")
+	if len(mockServer.AnsweredInlineQueries) < 2 {
+		t.Fatal("expected AnswerInlineQuery to be called for both queries")
 	}
-	inlineAnswer := mockServer.AnsweredInlineQueries[0]
+	inlineAnswer := mockServer.AnsweredInlineQueries[1]
 	if len(inlineAnswer.Results) != 1 {
 		t.Fatalf("expected 1 inline result article, got %d", len(inlineAnswer.Results))
 	}

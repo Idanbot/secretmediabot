@@ -33,7 +33,7 @@ func (h *Handler) handleGroupMessage(
 	case "whisper":
 		return h.beginWhisper(ctx, message, sender, chat, parsed.Args)
 	case "help":
-		return h.sendReply(ctx, message, groupHelpText, nil)
+		return h.sendReply(ctx, message, h.groupHelpText(), nil)
 	case "privacy":
 		return h.sendReply(ctx, message, privacyText, nil)
 	default:
@@ -118,7 +118,7 @@ func (h *Handler) handlePrivateMessage(ctx context.Context, message telegram.Mes
 		case "start":
 			return h.handleStart(ctx, message, sender, parsed.Args)
 		case "help":
-			return h.sendReply(ctx, message, fmt.Sprintf(privateHelpText, h.mediaLimitText()), nil)
+			return h.sendReply(ctx, message, h.privateHelpText(), nil)
 		case "privacy":
 			return h.sendReply(ctx, message, privacyText, nil)
 		case "cancel":
@@ -194,7 +194,7 @@ func (h *Handler) handleStart(
 	parameter string,
 ) error {
 	if strings.TrimSpace(parameter) == "" {
-		return h.sendReply(ctx, message, welcomeText, nil)
+		return h.sendReply(ctx, message, h.welcomeText(), nil)
 	}
 	if strings.HasPrefix(strings.TrimSpace(parameter), service.GuestPrefix) {
 		return h.handleGuestStart(ctx, message, sender, parameter)
@@ -223,9 +223,18 @@ func (h *Handler) handleGuestStart(ctx context.Context, message telegram.Message
 	if session.Role == service.GuestRoleSender {
 		switch session.Request.State {
 		case repository.GuestStateAwaitingSecret, repository.GuestStateIngestingSecret:
-			return h.sendReply(ctx, message, "Composer ready. Send secret text or one supported media item privately. Use /cancel to stop.", nil)
+			targetName := "the recipient"
+			if session.Request.TargetUsername != "" {
+				targetName = "@" + session.Request.TargetUsername
+			} else if session.Request.TargetUserID != nil {
+				targetName = fmt.Sprintf("user %d", *session.Request.TargetUserID)
+			}
+			return h.sendReply(ctx, message, fmt.Sprintf(
+				"Composer ready for %s. Send secret text or one photo, voice note, video, audio file, or document here (up to %s). Use /cancel to stop.",
+				targetName, h.mediaLimitText(),
+			), nil)
 		case repository.GuestStateReady:
-			return h.sendReply(ctx, message, "The secret is ready. The target can open it privately from the group envelope.", nil)
+			return h.sendReply(ctx, message, "You are the sender of this secret. The secret is ready and waiting for the recipient to open it from the envelope.", nil)
 		case repository.GuestStateOpening:
 			return h.sendReply(ctx, message, "A delivery attempt is in progress. If it fails, the envelope becomes openable again shortly.", nil)
 		case repository.GuestStateOpened:
@@ -242,7 +251,7 @@ func (h *Handler) handleGuestStart(ctx context.Context, message telegram.Message
 	case repository.GuestStateOpened:
 		return h.sendReply(ctx, message, "This locked secret was already opened.", nil)
 	case repository.GuestStateAwaitingSecret, repository.GuestStateIngestingSecret:
-		return h.sendReply(ctx, message, "The sender has not added the secret yet. Press Open privately again after it is ready.", nil)
+		return h.sendReply(ctx, message, "The secret is not ready yet. The sender has not added the secret yet. Press Open privately again after it is ready.", nil)
 	default:
 		return h.sendReply(ctx, message, "This locked secret is no longer available.", nil)
 	}
@@ -587,28 +596,37 @@ func userMessage(err error) (string, bool) {
 	}
 }
 
-const welcomeText = "Welcome to Secret Whisper Bot 🔒\n\n" +
-	"Two ways to send locked secrets:\n\n" +
-	"1️⃣ Instant Text Whisper (In any chat):\n" +
-	"Type @botusername @recipient your secret message\n" +
-	"Tap the popup to post the locked whisper. The recipient can unlock it immediately.\n\n" +
-	"2️⃣ Media/DM Whisper (Photos, Videos, Voice, Text):\n" +
-	"• Inline: Type @botusername @recipient, post envelope, then tap to add secret privately in DM.\n" +
-	"• Group: Reply to a user with /whisper, then send your secret here.\n\n" +
-	"Use /privacy to review our encryption and privacy model."
+func (h *Handler) welcomeText() string {
+	bot := "@" + h.botUsername
+	return fmt.Sprintf("Welcome to Secret Whisper Bot 🔒\n\n"+
+		"Two ways to send locked secrets:\n\n"+
+		"1️⃣ Instant Text Whisper (In any chat):\n"+
+		"Type %s @recipient your secret message\n"+
+		"Tap the popup to post the locked whisper. The recipient can unlock it immediately.\n\n"+
+		"2️⃣ Media/DM Whisper (Photos, Videos, Voice, Text):\n"+
+		"• Inline: Type %s @recipient, post envelope, then tap to add secret privately in DM.\n"+
+		"• Group: Reply to a user with /whisper, then send your secret here.\n\n"+
+		"Use /privacy to review our encryption and privacy model.", bot, bot)
+}
 
-const privateHelpText = "Secret Whisper Bot Help 🔒\n\n" +
-	"1️⃣ Instant Text Whisper (Any chat):\n" +
-	"Type in any chat: @botusername @recipient your secret message\n" +
-	"Tap the result to post. Recipient taps to unlock.\n\n" +
-	"2️⃣ Media / DM Whisper:\n" +
-	"Type @botusername @recipient in any chat or use /whisper in a shared group.\n" +
-	"Send your secret photo, voice note, video, or document here (up to %s).\n" +
-	"Use /cancel to discard an active composer draft and /privacy for security details."
+func (h *Handler) privateHelpText() string {
+	bot := "@" + h.botUsername
+	return fmt.Sprintf("Secret Whisper Bot Help 🔒\n\n"+
+		"1️⃣ Instant Text Whisper (Any chat):\n"+
+		"Type in any chat: %s @recipient your secret message\n"+
+		"Tap the result to post. Recipient taps to unlock.\n\n"+
+		"2️⃣ Media / DM Whisper:\n"+
+		"Type %s @recipient in any chat or use /whisper in a shared group.\n"+
+		"Send your secret photo, voice note, video, or document here (up to %s).\n"+
+		"Use /cancel to discard an active composer draft and /privacy for security details.", bot, bot, h.mediaLimitText())
+}
 
-const groupHelpText = "How to whisper in this group 🔒\n\n" +
-	"1. Reply to someone with /whisper, or use /whisper @username or /whisper 123456789.\n" +
-	"2. The bot will open a private composer with you in DM to collect the secret safely.\n" +
-	"3. Or type inline: @botusername @recipient your secret message to send an instant locked whisper."
+func (h *Handler) groupHelpText() string {
+	bot := "@" + h.botUsername
+	return fmt.Sprintf("How to whisper in this group 🔒\n\n"+
+		"1. Reply to someone with /whisper, or use /whisper @username or /whisper 123456789.\n"+
+		"2. The bot will open a private composer with you in DM to collect the secret safely.\n"+
+		"3. Or type inline: %s @recipient your secret message to send an instant locked whisper.", bot)
+}
 
 const privacyText = "Privacy: secret payloads are encrypted in PostgreSQL and ordinary group members receive only an empty envelope. Content is retained for 30 days by default. One-time means one successful Telegram delivery, not proof that it was read. Ephemeral deletion and protect-content are best effort; screenshots, devices, backups, and Telegram copies may remain."
