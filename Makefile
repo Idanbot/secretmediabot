@@ -4,6 +4,9 @@ GOOSE_VERSION ?= v3.27.3
 GOOSE := $(GO) run github.com/pressly/goose/v3/cmd/goose@$(GOOSE_VERSION)
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+COMMIT_MSG ?= $(shell git log -1 --pretty=%s 2>/dev/null || echo unknown)
+BUILD_TIME ?= $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
+CI_RUN ?= local
 DATABASE_DRIVER ?= postgres
 
 -include .env
@@ -16,7 +19,7 @@ all: check build
 build:
 	mkdir -p bin
 	CGO_ENABLED=0 $(GO) build -trimpath \
-		-ldflags="-s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)" \
+		-ldflags="-s -w -X 'main.version=$(VERSION)' -X 'main.commit=$(COMMIT)' -X 'main.commitMessage=$(COMMIT_MSG)' -X 'main.buildTime=$(BUILD_TIME)' -X 'main.ciRunNumber=$(CI_RUN)'" \
 		-o bin/$(APP) ./cmd/bot
 
 run:

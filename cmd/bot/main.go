@@ -25,8 +25,11 @@ import (
 )
 
 var (
-	version = "dev"
-	commit  = "unknown"
+	version       = "dev"
+	commit        = "unknown"
+	commitMessage = "unknown"
+	buildTime     = "unknown"
+	ciRunNumber   = "local"
 )
 
 func main() {
@@ -212,6 +215,13 @@ func run(parent context.Context) error {
 		Service: useCases, Telegram: telegramClient, BotUsername: cfg.Telegram.BotUsername,
 		MaxMediaBytes: cfg.Media.MaxBytes, MediaDownloadTimeout: cfg.Media.DownloadTimeout,
 		RequestTimeout: cfg.Telegram.RequestTimeout, Logger: logger,
+		BuildInfo: bot.BuildInfo{
+			Version:       version,
+			Commit:        commit,
+			CommitMessage: commitMessage,
+			BuildTime:     buildTime,
+			CIRunNumber:   ciRunNumber,
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("initialize Telegram handler: %w", err)

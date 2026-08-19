@@ -76,6 +76,14 @@ type telegramAPI interface {
 	DeleteMessage(context.Context, telegram.DeleteMessageRequest) error
 }
 
+type BuildInfo struct {
+	Version       string
+	Commit        string
+	CommitMessage string
+	BuildTime     string
+	CIRunNumber   string
+}
+
 type Config struct {
 	Service              *service.Service
 	Telegram             *telegram.Client
@@ -84,6 +92,7 @@ type Config struct {
 	MediaDownloadTimeout time.Duration
 	RequestTimeout       time.Duration
 	Logger               *slog.Logger
+	BuildInfo            BuildInfo
 }
 
 type Handler struct {
@@ -95,6 +104,7 @@ type Handler struct {
 	mediaDownloadTimeout time.Duration
 	requestTimeout       time.Duration
 	logger               *slog.Logger
+	buildInfo            BuildInfo
 }
 
 func New(cfg Config) (*Handler, error) {
@@ -115,6 +125,7 @@ func New(cfg Config) (*Handler, error) {
 		botUsername:   strings.TrimPrefix(strings.TrimSpace(cfg.BotUsername), "@"),
 		maxMediaBytes: cfg.MaxMediaBytes, mediaDownloadTimeout: cfg.MediaDownloadTimeout,
 		requestTimeout: requestTimeout, logger: logger,
+		buildInfo: cfg.BuildInfo,
 	}, nil
 }
 

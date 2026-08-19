@@ -16,6 +16,9 @@ ARG TARGETOS=linux
 ARG TARGETARCH
 ARG VERSION=dev
 ARG COMMIT=unknown
+ARG COMMIT_MESSAGE=unknown
+ARG BUILD_TIME=unknown
+ARG CI_RUN_NUMBER=local
 
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
@@ -23,7 +26,12 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go build \
       -trimpath \
       -buildvcs=false \
-      -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \
+      -ldflags="-s -w \
+        -X 'main.version=${VERSION}' \
+        -X 'main.commit=${COMMIT}' \
+        -X 'main.commitMessage=${COMMIT_MESSAGE}' \
+        -X 'main.buildTime=${BUILD_TIME}' \
+        -X 'main.ciRunNumber=${CI_RUN_NUMBER}'" \
       -o /out/secretmediabot \
       ./cmd/bot
 

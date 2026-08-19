@@ -10,6 +10,9 @@ services:
       args:
         VERSION: ${VERSION:-dev}
         COMMIT: ${COMMIT:-unknown}
+        COMMIT_MESSAGE: ${COMMIT_MESSAGE:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+        CI_RUN_NUMBER: ${CI_RUN_NUMBER:-local}
     restart: unless-stopped
     init: true
     env_file:

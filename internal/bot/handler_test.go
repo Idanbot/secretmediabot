@@ -1027,10 +1027,21 @@ func TestOwnerCommandsAuthorizeReviewAndDelete(t *testing.T) {
 			isOwner: func(int64) bool { return true },
 		}
 		tg := &fakeTelegram{}
-		if err := testHandler(useCases, tg).HandleUpdate(context.Background(), privateUpdate(101, "/owner_menu")); err != nil {
+		h := testHandler(useCases, tg)
+		h.buildInfo = BuildInfo{
+			Version:       "v1.2.3",
+			Commit:        "abcdef123456",
+			CommitMessage: "feat: exciting new feature",
+			BuildTime:     "2026-08-20T00:00:00Z",
+			CIRunNumber:   "99",
+		}
+		if err := h.HandleUpdate(context.Background(), privateUpdate(101, "/owner_menu")); err != nil {
 			t.Fatalf("HandleUpdate(/owner_menu) error = %v", err)
 		}
-		if len(tg.messages) != 1 || !strings.Contains(tg.messages[0].Text, "Operator Menu") {
+		if len(tg.messages) != 1 || !strings.Contains(tg.messages[0].Text, "Operator Menu") ||
+			!strings.Contains(tg.messages[0].Text, "CI Run: #99") ||
+			!strings.Contains(tg.messages[0].Text, "abcdef1") ||
+			!strings.Contains(tg.messages[0].Text, "feat: exciting new feature") {
 			t.Fatalf("menu messages = %#v", tg.messages)
 		}
 	})

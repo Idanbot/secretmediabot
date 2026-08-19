@@ -48,8 +48,38 @@ func (h *Handler) ownerMenu(ctx context.Context, message telegram.Message, owner
 		ephemeralText = fmt.Sprintf("Enabled (auto-deletes %s after open)", ephemeral)
 	}
 
-	text := fmt.Sprintf(`🛡️ Secret Media Bot — Operator Menu
+	buildInfoText := ""
+	if h.buildInfo.Version != "" || h.buildInfo.Commit != "" || h.buildInfo.CIRunNumber != "" {
+		version := h.buildInfo.Version
+		if version == "" {
+			version = "dev"
+		}
+		commit := h.buildInfo.Commit
+		if len(commit) > 7 {
+			commit = commit[:7]
+		}
+		if commit == "" {
+			commit = "unknown"
+		}
+		ciRun := h.buildInfo.CIRunNumber
+		if ciRun == "" {
+			ciRun = "local"
+		}
+		buildTime := h.buildInfo.BuildTime
+		if buildTime == "" {
+			buildTime = "unknown"
+		}
+		msg := h.buildInfo.CommitMessage
+		if msg == "" {
+			msg = "unknown"
+		}
 
+		buildInfoText = fmt.Sprintf("\n\n🚀 Build & Deployment:\n• Version: %s\n• CI Run: #%s\n• Commit: %s\n• Message: %s\n• Built: %s\n",
+			version, ciRun, commit, msg, buildTime)
+	}
+
+	text := fmt.Sprintf(`🛡️ Secret Media Bot — Operator Menu
+%s
 ⏱️ Self-Destruction on Open: %s
 • /owner_ephemeral off — Turn self-destruction off
 • /owner_ephemeral 30s — Auto-delete 30s after open
@@ -61,7 +91,7 @@ func (h *Handler) ownerMenu(ctx context.Context, message telegram.Message, owner
 • /owner_list [limit] [offset] — List recent whispers (metadata only)
 • /owner_open <whisper-uuid> — Review decrypted whisper payload
 • /owner_delete <whisper-uuid> — Hard-delete whisper and payload
-• /owner_retain <whisper-uuid> <duration> — Adjust retention window`, ephemeralText)
+• /owner_retain <whisper-uuid> <duration> — Adjust retention window`, buildInfoText, ephemeralText)
 
 	return h.sendReply(ctx, message, text, nil)
 }

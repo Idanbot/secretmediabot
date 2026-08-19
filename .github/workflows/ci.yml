@@ -279,6 +279,15 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      - name: Extract build metadata
+        id: build_meta
+        shell: bash
+        run: |
+          COMMIT_MSG=$(git log -1 --pretty=%s || echo "unknown")
+          CLEAN_MSG=$(echo "$COMMIT_MSG" | tr -d '"'\''\n\r' | cut -c 1-120)
+          echo "commit_message=$CLEAN_MSG" >> "$GITHUB_OUTPUT"
+          echo "build_time=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
       - name: Build container image locally for scanning
         uses: docker/build-push-action@v7
         with:
@@ -289,6 +298,9 @@ jobs:
           build-args: |
             VERSION=${{ github.ref_name }}
             COMMIT=${{ github.sha }}
+            COMMIT_MESSAGE=${{ steps.build_meta.outputs.commit_message }}
+            BUILD_TIME=${{ steps.build_meta.outputs.build_time }}
+            CI_RUN_NUMBER=${{ github.run_number }}
 
       - name: Scan container image before publishing
         id: scan-image
@@ -348,6 +360,9 @@ jobs:
           build-args: |
             VERSION=${{ github.ref_name }}
             COMMIT=${{ github.sha }}
+            COMMIT_MESSAGE=${{ steps.build_meta.outputs.commit_message }}
+            BUILD_TIME=${{ steps.build_meta.outputs.build_time }}
+            CI_RUN_NUMBER=${{ github.run_number }}
           cache-from: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache
           cache-to: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache,mode=max
           provenance: mode=max
