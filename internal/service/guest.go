@@ -138,10 +138,11 @@ func (s *Service) CreateGuestRequest(ctx context.Context, params CreateGuestRequ
 		return GuestSession{}, mapGuestRepositoryError(err)
 	}
 	recent := domain.RecentTarget{LastUsedAt: now}
-	if params.Target.Kind == command.TargetUserID {
+	switch params.Target.Kind {
+	case command.TargetUserID:
 		recent.TargetUserID = params.Target.UserID
 		recent.DisplayName = fmt.Sprintf("User %d", params.Target.UserID)
-	} else if params.Target.Kind == command.TargetUsername {
+	case command.TargetUsername:
 		recent.TargetUsername = request.TargetUsername
 		recent.DisplayName = "@" + request.TargetUsername
 	}
@@ -213,10 +214,11 @@ func (s *Service) CreateGuestInlineSecret(ctx context.Context, params CreateGues
 		return GuestSession{}, mapGuestRepositoryError(err)
 	}
 	recent := domain.RecentTarget{LastUsedAt: now}
-	if params.Target.Kind == command.TargetUserID {
+	switch params.Target.Kind {
+	case command.TargetUserID:
 		recent.TargetUserID = params.Target.UserID
 		recent.DisplayName = fmt.Sprintf("User %d", params.Target.UserID)
-	} else if params.Target.Kind == command.TargetUsername {
+	case command.TargetUsername:
 		recent.TargetUsername = request.TargetUsername
 		recent.DisplayName = "@" + request.TargetUsername
 	}
