@@ -55,10 +55,10 @@ func (h *Handler) ownerMenu(ctx context.Context, message telegram.Message, owner
 	if version == "" {
 		version = "dev"
 	}
-	buildSection.WriteString(fmt.Sprintf("\n• Version: %s", version))
+	fmt.Fprintf(&buildSection, "\n• Version: %s", version)
 
 	if h.buildInfo.CIRunNumber != "" && h.buildInfo.CIRunNumber != "local" {
-		buildSection.WriteString(fmt.Sprintf("\n• CI Run: #%s", h.buildInfo.CIRunNumber))
+		fmt.Fprintf(&buildSection, "\n• CI Run: #%s", h.buildInfo.CIRunNumber)
 	} else {
 		buildSection.WriteString("\n• Environment: Local / Development")
 	}
@@ -68,15 +68,15 @@ func (h *Handler) ownerMenu(ctx context.Context, message telegram.Message, owner
 		commit = commit[:7]
 	}
 	if commit != "" && commit != "unknown" {
-		buildSection.WriteString(fmt.Sprintf("\n• Commit: %s", commit))
+		fmt.Fprintf(&buildSection, "\n• Commit: %s", commit)
 	}
 
 	if h.buildInfo.CommitMessage != "" && h.buildInfo.CommitMessage != "unknown" {
-		buildSection.WriteString(fmt.Sprintf("\n• Message: %s", h.buildInfo.CommitMessage))
+		fmt.Fprintf(&buildSection, "\n• Message: %s", h.buildInfo.CommitMessage)
 	}
 
 	if h.buildInfo.BuildTime != "" && h.buildInfo.BuildTime != "unknown" {
-		buildSection.WriteString(fmt.Sprintf("\n• Built: %s", h.buildInfo.BuildTime))
+		fmt.Fprintf(&buildSection, "\n• Built: %s", h.buildInfo.BuildTime)
 	}
 
 	text := fmt.Sprintf(`🛡️ Secret Media Bot — Operator Menu
