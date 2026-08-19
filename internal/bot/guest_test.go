@@ -100,6 +100,10 @@ func (f *fakeGuestUseCases) GuestMediaFallback(context.Context, uuid.UUID) ([]by
 	return nil, "", "", service.ErrGuestNotFound
 }
 
+func (f *fakeGuestUseCases) GetRecentTargets(context.Context, int64, int) ([]domain.RecentTarget, error) {
+	return nil, nil
+}
+
 func TestParseGuestTargetSupportsIDsAndUsernames(t *testing.T) {
 	tests := []struct {
 		text string
@@ -198,8 +202,8 @@ func TestInlineQueryDirectSecretMessage(t *testing.T) {
 		t.Fatalf("expected 1 inline answer, got %d", len(tg.inlineAnswers))
 	}
 	ans := tg.inlineAnswers[0]
-	if len(ans.Results) != 1 {
-		t.Fatalf("expected 1 inline article result, got %d", len(ans.Results))
+	if len(ans.Results) < 1 {
+		t.Fatalf("expected at least 1 inline article result, got %d", len(ans.Results))
 	}
 	article := ans.Results[0]
 	if !strings.Contains(article.Title, "@target_user") {
@@ -214,5 +218,115 @@ func TestInlineQueryDirectSecretMessage(t *testing.T) {
 	}
 	if !strings.Contains(button.URL, "guest_inline_secret_token") {
 		t.Fatalf("expected button URL to contain guest token, got %q", button.URL)
+	}
+}
+
+func TestInlineQueryRecentTargets(t *testing.T) {
+	tg := &fakeTelegram{}
+	guest := &fakeGuestUseCases{}
+	h := testHandler(&fakeUseCases{}, tg)
+	h.guest = guest
+
+	// User queries @bot [empty query] -> should list recent targets
+	guest.create = func(ctx context.Context, params service.CreateGuestRequestParams) (service.GuestSession, error) {
+		return service.GuestSession{Parameter: "guest_media_token"}, nil
+	}
+
+	err := h.HandleUpdate(context.Background(), telegram.Update{
+		InlineQuery: &telegram.InlineQuery{
+			ID:    "query_empty",
+			From:  telegram.User{ID: 101, Username: "sender_user"},
+			Query: "",
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleUpdate(empty inline query) error = %v", err)
+	}
+	if len(tg.inlineAnswers) != 1 {
+		t.Fatalf("expected 1 inline answer, got %d", len(tg.inlineAnswers))
+	}
+}
+
+func TestParseInlineQueryVariantsAndQuotes(t *testing.T) {
+	tests := []struct {
+		input      string
+		targetKind command.TargetKind
+		targetID   int64
+		targetUser string
+		secretText string
+	}{
+		{
+			input:      `@target_user "hello world"`,
+			targetKind: command.TargetUsername,
+			targetUser: "target_user",
+			secretText: "hello world",
+		},
+		{
+			input:      `@target_user 'single quotes'`,
+			targetKind: command.TargetUsername,
+			targetUser: "target_user",
+			secretText: "single quotes",
+		},
+		{
+			input:      `@target_user “smart quotes”`,
+			targetKind: command.TargetUsername,
+			targetUser: "target_user",
+			secretText: "smart quotes",
+		},
+		{
+			input:      `@target_user no quotes here`,
+			targetKind: command.TargetUsername,
+			targetUser: "target_user",
+			secretText: "no quotes here",
+		},
+		{
+			input:      `123456789 "numeric target"`,
+			targetKind: command.TargetUserID,
+			targetID:   123456789,
+			secretText: "numeric target",
+		},
+		{
+			input:      `[123456789] "bracket target"`,
+			targetKind: command.TargetUserID,
+			targetID:   123456789,
+			secretText: "bracket target",
+		},
+		{
+			input:      `id:123456789 "id prefix target"`,
+			targetKind: command.TargetUserID,
+			targetID:   123456789,
+			secretText: "id prefix target",
+		},
+		{
+			input:      `target_user "no at-symbol target"`,
+			targetKind: command.TargetUsername,
+			targetUser: "target_user",
+			secretText: "no at-symbol target",
+		},
+		{
+			input:      `@target_user`,
+			targetKind: command.TargetUsername,
+			targetUser: "target_user",
+			secretText: "",
+		},
+	}
+
+	for _, tt := range tests {
+		target, secret, err := parseInlineQuery(tt.input)
+		if err != nil {
+			t.Fatalf("parseInlineQuery(%q) error = %v", tt.input, err)
+		}
+		if target.Kind != tt.targetKind {
+			t.Errorf("parseInlineQuery(%q) target.Kind = %v, want %v", tt.input, target.Kind, tt.targetKind)
+		}
+		if tt.targetKind == command.TargetUserID && target.UserID != tt.targetID {
+			t.Errorf("parseInlineQuery(%q) target.UserID = %d, want %d", tt.input, target.UserID, tt.targetID)
+		}
+		if tt.targetKind == command.TargetUsername && target.Username != tt.targetUser {
+			t.Errorf("parseInlineQuery(%q) target.Username = %q, want %q", tt.input, target.Username, tt.targetUser)
+		}
+		if secret != tt.secretText {
+			t.Errorf("parseInlineQuery(%q) secret = %q, want %q", tt.input, secret, tt.secretText)
+		}
 	}
 }

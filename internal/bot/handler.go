@@ -40,6 +40,8 @@ type useCases interface {
 	OwnerReview(context.Context, int64, uuid.UUID) (service.OwnerReview, error)
 	OwnerDelete(context.Context, int64, uuid.UUID) error
 	OwnerSetRetention(context.Context, int64, uuid.UUID, time.Duration) error
+	GetEphemeralDeleteAfter() time.Duration
+	SetEphemeralDeleteAfter(time.Duration)
 }
 
 type guestUseCases interface {
@@ -56,6 +58,7 @@ type guestUseCases interface {
 	CompleteGuestOpen(context.Context, service.GuestDelivery, int64) error
 	FailGuestOpen(context.Context, service.GuestDelivery) error
 	GuestMediaFallback(context.Context, uuid.UUID) ([]byte, domain.MediaType, string, error)
+	GetRecentTargets(context.Context, int64, int) ([]domain.RecentTarget, error)
 }
 
 type telegramAPI interface {

@@ -33,7 +33,7 @@ func TestNewValidatesDependenciesConfigurationAndOwners(t *testing.T) {
 		{name: "ingest lease", store: store, cipher: cipher, mutate: func(o *Options) { o.IngestLease = 0 }},
 		{name: "open lease", store: store, cipher: cipher, mutate: func(o *Options) { o.OpenLease = 0 }},
 		{name: "publish lease", store: store, cipher: cipher, mutate: func(o *Options) { o.PublishLease = 0 }},
-		{name: "delete delay", store: store, cipher: cipher, mutate: func(o *Options) { o.EphemeralDeleteAfter = 0 }},
+		{name: "delete delay", store: store, cipher: cipher, mutate: func(o *Options) { o.EphemeralDeleteAfter = -time.Second }},
 		{name: "media limit", store: store, cipher: cipher, mutate: func(o *Options) { o.MaxMediaBytes = 0 }},
 		{name: "active draft limit", store: store, cipher: cipher, mutate: func(o *Options) { o.MaxActiveDraftsPerUser = 0 }},
 		{name: "rate limit", store: store, cipher: cipher, mutate: func(o *Options) { o.MaxWhispersPerUserPerHour = 0 }},

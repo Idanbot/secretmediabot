@@ -662,7 +662,7 @@ func (s *Store) CompleteGuestOpen(ctx context.Context, params GuestCompleteOpenP
 		return err
 	}
 	now := nowOr(params.Now)
-	if params.RequestID == uuid.Nil || params.ExpectedLeaseUntil.IsZero() || params.MessageID <= 0 || !params.DeleteAt.After(now) {
+	if params.RequestID == uuid.Nil || params.ExpectedLeaseUntil.IsZero() || params.MessageID <= 0 {
 		return fmt.Errorf("%w: invalid guest open completion", ErrInvalidInput)
 	}
 	return translateError(db.Transaction(func(tx *gorm.DB) error {
@@ -675,19 +675,22 @@ func (s *Store) CompleteGuestOpen(ctx context.Context, params GuestCompleteOpenP
 		if result.RowsAffected != 1 {
 			return ErrLeaseLost
 		}
-		job := guestPrivateDeleteJobRow{
-			RequestID: &params.RequestID, ChatID: 0, MessageID: params.MessageID,
-			DeleteAfter: params.DeleteAt.UTC(), NextAttemptAt: params.DeleteAt.UTC(), CreatedAt: now, UpdatedAt: now,
+		if params.DeleteAt.After(now) {
+			job := guestPrivateDeleteJobRow{
+				RequestID: &params.RequestID, ChatID: 0, MessageID: params.MessageID,
+				DeleteAfter: params.DeleteAt.UTC(), NextAttemptAt: params.DeleteAt.UTC(), CreatedAt: now, UpdatedAt: now,
+			}
+			var request guestRequestRow
+			if err := tx.Where("id = ?", params.RequestID).Take(&request).Error; err != nil {
+				return translateError(err)
+			}
+			if request.TargetUserID == nil {
+				return fmt.Errorf("%w: guest target was not claimed", ErrConflict)
+			}
+			job.ChatID = *request.TargetUserID
+			return tx.Create(&job).Error
 		}
-		var request guestRequestRow
-		if err := tx.Where("id = ?", params.RequestID).Take(&request).Error; err != nil {
-			return translateError(err)
-		}
-		if request.TargetUserID == nil {
-			return fmt.Errorf("%w: guest target was not claimed", ErrConflict)
-		}
-		job.ChatID = *request.TargetUserID
-		return tx.Create(&job).Error
+		return nil
 	}))
 }
 
@@ -984,4 +987,80 @@ func stringValue(value *string) string {
 		return ""
 	}
 	return *value
+}
+
+func (s *Store) FindRecentTargetsForSender(ctx context.Context, senderID int64, limit int) ([]domain.RecentTarget, error) {
+	db, err := s.withContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 3
+	}
+
+	var rows []struct {
+		TargetUserID   *int64    `gorm:"column:target_user_id"`
+		TargetUsername string    `gorm:"column:target_username"`
+		FirstName      string    `gorm:"column:first_name"`
+		LastName       string    `gorm:"column:last_name"`
+		Username       string    `gorm:"column:user_name"`
+		LastUsedAt     time.Time `gorm:"column:last_used_at"`
+	}
+
+	err = db.Raw(`
+		WITH recent_targets AS (
+			SELECT 
+				target_user_id,
+				target_username,
+				MAX(created_at) AS last_used_at
+			FROM guest_secret_requests
+			WHERE sender_id = ?
+			  AND (target_user_id IS NOT NULL OR (target_username IS NOT NULL AND target_username <> ''))
+			GROUP BY target_user_id, target_username
+			ORDER BY last_used_at DESC
+			LIMIT ?
+		)
+		SELECT 
+			rt.target_user_id,
+			rt.target_username,
+			COALESCE(u.first_name, '') AS first_name,
+			COALESCE(u.last_name, '') AS last_name,
+			COALESCE(u.username, '') AS user_name,
+			rt.last_used_at
+		FROM recent_targets rt
+		LEFT JOIN users u ON (rt.target_user_id IS NOT NULL AND u.telegram_user_id = rt.target_user_id)
+		                  OR (rt.target_user_id IS NULL AND rt.target_username IS NOT NULL AND u.username_normalized = lower(ltrim(btrim(rt.target_username), '@')))
+		ORDER BY rt.last_used_at DESC
+	`, senderID, limit).Scan(&rows).Error
+
+	if err != nil {
+		return nil, translateError(err)
+	}
+
+	var results []domain.RecentTarget
+	for _, r := range rows {
+		targetID := int64(0)
+		if r.TargetUserID != nil {
+			targetID = *r.TargetUserID
+		}
+		targetUser := r.TargetUsername
+		if targetUser == "" && r.Username != "" {
+			targetUser = r.Username
+		}
+		displayName := strings.TrimSpace(r.FirstName + " " + r.LastName)
+		if displayName == "" && r.Username != "" {
+			displayName = "@" + r.Username
+		} else if displayName == "" && targetUser != "" {
+			displayName = "@" + strings.TrimPrefix(targetUser, "@")
+		} else if displayName == "" && targetID > 0 {
+			displayName = fmt.Sprintf("User %d", targetID)
+		}
+		results = append(results, domain.RecentTarget{
+			TargetUserID:   targetID,
+			TargetUsername: targetUser,
+			DisplayName:    displayName,
+			LastUsedAt:     r.LastUsedAt,
+		})
+	}
+	return results, nil
 }

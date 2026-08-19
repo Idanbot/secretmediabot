@@ -32,6 +32,7 @@ type GuestStore interface {
 	MarkGuestEnvelope(context.Context, []byte, string, time.Time) error
 	CancelGuestRequest(context.Context, repository.CancelGuestParams) (int, error)
 	FindGuestMediaPayload(context.Context, uuid.UUID) (repository.GuestMediaBlob, error)
+	FindRecentTargetsForSender(context.Context, int64, int) ([]domain.RecentTarget, error)
 }
 
 type CreateGuestRequestParams struct {
@@ -136,6 +137,15 @@ func (s *Service) CreateGuestRequest(ctx context.Context, params CreateGuestRequ
 	if err != nil {
 		return GuestSession{}, mapGuestRepositoryError(err)
 	}
+	recent := domain.RecentTarget{LastUsedAt: now}
+	if params.Target.Kind == command.TargetUserID {
+		recent.TargetUserID = params.Target.UserID
+		recent.DisplayName = fmt.Sprintf("User %d", params.Target.UserID)
+	} else if params.Target.Kind == command.TargetUsername {
+		recent.TargetUsername = request.TargetUsername
+		recent.DisplayName = "@" + request.TargetUsername
+	}
+	s.RecordRecentTarget(params.Sender.TelegramUserID, recent)
 	return GuestSession{Request: request, Parameter: GuestPrefix + guestToken.Raw}, nil
 }
 
@@ -202,6 +212,15 @@ func (s *Service) CreateGuestInlineSecret(ctx context.Context, params CreateGues
 	if err != nil {
 		return GuestSession{}, mapGuestRepositoryError(err)
 	}
+	recent := domain.RecentTarget{LastUsedAt: now}
+	if params.Target.Kind == command.TargetUserID {
+		recent.TargetUserID = params.Target.UserID
+		recent.DisplayName = fmt.Sprintf("User %d", params.Target.UserID)
+	} else if params.Target.Kind == command.TargetUsername {
+		recent.TargetUsername = request.TargetUsername
+		recent.DisplayName = "@" + request.TargetUsername
+	}
+	s.RecordRecentTarget(params.Sender.TelegramUserID, recent)
 	return GuestSession{Request: request, Parameter: GuestPrefix + guestToken.Raw}, nil
 }
 
@@ -405,9 +424,14 @@ func (s *Service) GuestMediaFallback(ctx context.Context, requestID uuid.UUID) (
 }
 
 func (s *Service) CompleteGuestOpen(ctx context.Context, delivery GuestDelivery, messageID int64) error {
+	deleteAfter := s.GetEphemeralDeleteAfter()
+	var deleteAt time.Time
+	if deleteAfter > 0 {
+		deleteAt = s.now().Add(deleteAfter)
+	}
 	return mapGuestRepositoryError(s.guestStore.CompleteGuestOpen(ctx, repository.GuestCompleteOpenParams{
 		RequestID: delivery.Request.ID, ExpectedLeaseUntil: delivery.LeaseUntil, MessageID: messageID,
-		DeleteAt: s.now().Add(s.options.EphemeralDeleteAfter), Now: s.now(),
+		DeleteAt: deleteAt, Now: s.now(),
 	}))
 }
 

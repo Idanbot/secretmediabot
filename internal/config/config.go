@@ -156,7 +156,7 @@ func Default() Config {
 			MaxGuestRequestsPerUserPerHour: 100,
 			PublishLeaseTimeout:            2 * time.Minute,
 			PublishInterval:                2 * time.Second,
-			EphemeralDeleteAfter:           30 * time.Second,
+			EphemeralDeleteAfter:           0,
 			EphemeralDeleteInterval:        2 * time.Second,
 		},
 		Media: MediaConfig{
@@ -402,8 +402,8 @@ func (c Config) Validate() error {
 		c.Whisper.PublishLeaseTimeout-c.Telegram.RequestTimeout < publicationLeaseFinishGap {
 		return errors.New("config PUBLISH_LEASE_TIMEOUT: must exceed TELEGRAM_REQUEST_TIMEOUT by at least 5s")
 	}
-	if c.Whisper.EphemeralDeleteAfter <= 0 || c.Whisper.EphemeralDeleteInterval <= 0 {
-		return errors.New("config ephemeral deletion: EPHEMERAL_DELETE_AFTER and EPHEMERAL_DELETE_INTERVAL must be positive")
+	if c.Whisper.EphemeralDeleteAfter < 0 || c.Whisper.EphemeralDeleteInterval <= 0 {
+		return errors.New("config ephemeral deletion: EPHEMERAL_DELETE_AFTER cannot be negative and EPHEMERAL_DELETE_INTERVAL must be positive")
 	}
 	for _, id := range c.Whisper.AllowedChatIDs {
 		if id == 0 {

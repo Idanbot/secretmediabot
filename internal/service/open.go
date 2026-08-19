@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/idan/secretmediabot/internal/domain"
@@ -82,11 +83,16 @@ func (s *Service) ReserveOpen(
 func (s *Service) CompleteOpen(ctx context.Context, delivery OpenDelivery, ephemeralMessageID int64) error {
 	now := s.now()
 	messageID := ephemeralMessageID
+	deleteAfter := s.GetEphemeralDeleteAfter()
+	var deleteAt time.Time
+	if deleteAfter > 0 {
+		deleteAt = now.Add(deleteAfter)
+	}
 	return s.store.CompleteOpen(ctx, repository.CompleteOpenParams{
 		WhisperID: delivery.Whisper.ID, EventID: delivery.EventID,
 		CallbackQueryID:   delivery.CallbackQueryID,
 		TelegramMessageID: &messageID, EphemeralMessageID: &ephemeralMessageID,
-		DeleteAt: now.Add(s.options.EphemeralDeleteAfter), Now: now,
+		DeleteAt: deleteAt, Now: now,
 	})
 }
 

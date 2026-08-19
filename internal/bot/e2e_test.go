@@ -3,6 +3,7 @@ package bot_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -583,6 +584,46 @@ func (s *e2eStore) FindGuestMediaPayload(ctx context.Context, id uuid.UUID) (rep
 	}, nil
 }
 
+func (s *e2eStore) FindRecentTargetsForSender(ctx context.Context, senderID int64, limit int) ([]domain.RecentTarget, error) {
+	if limit <= 0 {
+		limit = 3
+	}
+	var results []domain.RecentTarget
+	seen := make(map[string]bool)
+	for _, req := range s.guests {
+		if req.SenderID == senderID {
+			key := fmt.Sprintf("%v:%v", req.TargetUserID, req.TargetUsername)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			targetID := int64(0)
+			if req.TargetUserID != nil {
+				targetID = *req.TargetUserID
+			}
+			displayName := req.TargetUsername
+			if targetID > 0 {
+				if u, ok := s.users[targetID]; ok && u.DisplayName() != "" {
+					displayName = u.DisplayName()
+				}
+			}
+			if displayName == "" {
+				displayName = fmt.Sprintf("User %d", targetID)
+			}
+			results = append(results, domain.RecentTarget{
+				TargetUserID:   targetID,
+				TargetUsername: req.TargetUsername,
+				DisplayName:    displayName,
+				LastUsedAt:     req.CreatedAt,
+			})
+			if len(results) >= limit {
+				break
+			}
+		}
+	}
+	return results, nil
+}
+
 func TestE2ETextWhisperFullUserJourney(t *testing.T) {
 	t.Parallel()
 
@@ -1046,8 +1087,8 @@ func TestE2EInlineInstantTextWhisperFlow(t *testing.T) {
 		t.Fatal("expected AnswerInlineQuery to be called for both queries")
 	}
 	inlineAnswer := mockServer.AnsweredInlineQueries[1]
-	if len(inlineAnswer.Results) != 1 {
-		t.Fatalf("expected 1 inline result article, got %d", len(inlineAnswer.Results))
+	if len(inlineAnswer.Results) < 1 {
+		t.Fatalf("expected at least 1 inline result article, got %d", len(inlineAnswer.Results))
 	}
 	article := inlineAnswer.Results[0]
 	if !strings.Contains(article.Title, "@bobby_user") {
@@ -1298,5 +1339,646 @@ func TestE2EInlineMediaTwoStepDraftFlow(t *testing.T) {
 	}
 	if !deliveredMedia {
 		t.Fatal("expected Bob to receive secret photo via sendPhoto")
+	}
+}
+
+func TestE2EInlineInstantTextWhisperWithQuotes(t *testing.T) {
+	t.Parallel()
+
+	mockServer := testutil.NewTelegramMockServer("secretmediabot")
+	defer mockServer.Close()
+
+	client, err := telegram.NewClient(telegram.ClientConfig{
+		Token:   mockServer.BotToken,
+		BaseURL: mockServer.BaseURL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	keyring := newKeyring(t)
+	store := newE2EStore()
+	useCases, err := service.New(store, keyring, service.Options{
+		DraftTTL:                       time.Hour,
+		WhisperTTL:                     24 * time.Hour,
+		ContentRetention:               30 * 24 * time.Hour,
+		IngestLease:                    time.Minute,
+		OpenLease:                      30 * time.Second,
+		PublishLease:                   time.Minute,
+		EphemeralDeleteAfter:           30 * time.Second,
+		MaxMediaBytes:                  20 * 1024 * 1024,
+		MaxActiveDraftsPerUser:         5,
+		MaxWhispersPerUserPerHour:      50,
+		MaxActiveGuestRequestsPerUser:  25,
+		MaxGuestRequestsPerUserPerHour: 100,
+		DefaultOneTime:                 true,
+		ProtectContent:                 true,
+		OwnerIDs:                       []int64{999},
+		GuestModeEnabled:               true,
+	})
+	if err != nil {
+		t.Fatalf("service.New: %v", err)
+	}
+
+	handler, err := bot.New(bot.Config{
+		Service:              useCases,
+		Telegram:             client,
+		BotUsername:          "secretmediabot",
+		MaxMediaBytes:        20 * 1024 * 1024,
+		MediaDownloadTimeout: 10 * time.Second,
+		RequestTimeout:       5 * time.Second,
+		Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("bot.New: %v", err)
+	}
+
+	ctx := context.Background()
+	sender := telegram.User{ID: 101, FirstName: "Alice", Username: "alice_user"}
+	recipient := telegram.User{ID: 202, FirstName: "Bob", Username: "bobby_user"}
+
+	// Alice queries inline with double quotes: @secretmediabot @bobby_user "Confidential code 4242"
+	if err := handler.HandleUpdate(ctx, telegram.Update{
+		UpdateID: 1,
+		InlineQuery: &telegram.InlineQuery{
+			ID:    "inline_q_quotes",
+			From:  sender,
+			Query: `@bobby_user "Confidential code 4242"`,
+		},
+	}); err != nil {
+		t.Fatalf("HandleUpdate(inline quotes) error = %v", err)
+	}
+
+	if len(mockServer.AnsweredInlineQueries) == 0 {
+		t.Fatal("expected AnswerInlineQuery to be called")
+	}
+	inlineAnswer := mockServer.AnsweredInlineQueries[0]
+	article := inlineAnswer.Results[0]
+	button := article.ReplyMarkup.InlineKeyboard[0][0]
+
+	paramIndex := strings.Index(button.URL, "?start=")
+	startParam := button.URL[paramIndex+7:]
+
+	// Bob decrypts the secret
+	bobChat := telegram.Chat{ID: recipient.ID, Type: "private"}
+	if err := handler.HandleUpdate(ctx, telegram.Update{
+		UpdateID: 2,
+		Message: &telegram.Message{
+			MessageID: 55,
+			Chat:      bobChat,
+			From:      &recipient,
+			Text:      "/start " + startParam,
+		},
+	}); err != nil {
+		t.Fatalf("HandleUpdate(Bob open quoted secret) error = %v", err)
+	}
+
+	// Verify Bob received the unquoted payload cleanly
+	foundSecret := false
+	for _, msg := range mockServer.SentMessages {
+		if msg.ChatID == recipient.ID && msg.Text == "Confidential code 4242" {
+			foundSecret = true
+			break
+		}
+	}
+	if !foundSecret {
+		t.Fatal("expected Bob to receive decrypted secret without outer quotes")
+	}
+}
+
+func TestE2EInlineInstantTextWhisperWithNumericID(t *testing.T) {
+	t.Parallel()
+
+	mockServer := testutil.NewTelegramMockServer("secretmediabot")
+	defer mockServer.Close()
+
+	client, err := telegram.NewClient(telegram.ClientConfig{
+		Token:   mockServer.BotToken,
+		BaseURL: mockServer.BaseURL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	keyring := newKeyring(t)
+	store := newE2EStore()
+	useCases, err := service.New(store, keyring, service.Options{
+		DraftTTL:                       time.Hour,
+		WhisperTTL:                     24 * time.Hour,
+		ContentRetention:               30 * 24 * time.Hour,
+		IngestLease:                    time.Minute,
+		OpenLease:                      30 * time.Second,
+		PublishLease:                   time.Minute,
+		EphemeralDeleteAfter:           30 * time.Second,
+		MaxMediaBytes:                  20 * 1024 * 1024,
+		MaxActiveDraftsPerUser:         5,
+		MaxWhispersPerUserPerHour:      50,
+		MaxActiveGuestRequestsPerUser:  25,
+		MaxGuestRequestsPerUserPerHour: 100,
+		DefaultOneTime:                 true,
+		ProtectContent:                 true,
+		OwnerIDs:                       []int64{999},
+		GuestModeEnabled:               true,
+	})
+	if err != nil {
+		t.Fatalf("service.New: %v", err)
+	}
+
+	handler, err := bot.New(bot.Config{
+		Service:              useCases,
+		Telegram:             client,
+		BotUsername:          "secretmediabot",
+		MaxMediaBytes:        20 * 1024 * 1024,
+		MediaDownloadTimeout: 10 * time.Second,
+		RequestTimeout:       5 * time.Second,
+		Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("bot.New: %v", err)
+	}
+
+	ctx := context.Background()
+	sender := telegram.User{ID: 101, FirstName: "Alice", Username: "alice_user"}
+	recipient := telegram.User{ID: 202, FirstName: "Bob", Username: "bobby_user"}
+
+	// Alice queries inline with numeric target: @secretmediabot [202] secret-for-id
+	if err := handler.HandleUpdate(ctx, telegram.Update{
+		UpdateID: 1,
+		InlineQuery: &telegram.InlineQuery{
+			ID:    "inline_q_id",
+			From:  sender,
+			Query: `[202] secret-for-id`,
+		},
+	}); err != nil {
+		t.Fatalf("HandleUpdate(inline numeric ID) error = %v", err)
+	}
+
+	inlineAnswer := mockServer.AnsweredInlineQueries[0]
+	button := inlineAnswer.Results[0].ReplyMarkup.InlineKeyboard[0][0]
+	paramIndex := strings.Index(button.URL, "?start=")
+	startParam := button.URL[paramIndex+7:]
+
+	// Bob (ID 202) opens secret
+	bobChat := telegram.Chat{ID: recipient.ID, Type: "private"}
+	if err := handler.HandleUpdate(ctx, telegram.Update{
+		UpdateID: 2,
+		Message: &telegram.Message{
+			MessageID: 56,
+			Chat:      bobChat,
+			From:      &recipient,
+			Text:      "/start " + startParam,
+		},
+	}); err != nil {
+		t.Fatalf("HandleUpdate(Bob open numeric ID secret) error = %v", err)
+	}
+
+	foundSecret := false
+	for _, msg := range mockServer.SentMessages {
+		if msg.ChatID == recipient.ID && msg.Text == "secret-for-id" {
+			foundSecret = true
+			break
+		}
+	}
+	if !foundSecret {
+		t.Fatal("expected Bob (ID 202) to receive decrypted secret")
+	}
+}
+
+func TestE2EInlineSenderClicksOwnButton(t *testing.T) {
+	t.Parallel()
+
+	mockServer := testutil.NewTelegramMockServer("secretmediabot")
+	defer mockServer.Close()
+
+	client, err := telegram.NewClient(telegram.ClientConfig{
+		Token:   mockServer.BotToken,
+		BaseURL: mockServer.BaseURL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	keyring := newKeyring(t)
+	store := newE2EStore()
+	useCases, err := service.New(store, keyring, service.Options{
+		DraftTTL:                       time.Hour,
+		WhisperTTL:                     24 * time.Hour,
+		ContentRetention:               30 * 24 * time.Hour,
+		IngestLease:                    time.Minute,
+		OpenLease:                      30 * time.Second,
+		PublishLease:                   time.Minute,
+		EphemeralDeleteAfter:           30 * time.Second,
+		MaxMediaBytes:                  20 * 1024 * 1024,
+		MaxActiveDraftsPerUser:         5,
+		MaxWhispersPerUserPerHour:      50,
+		MaxActiveGuestRequestsPerUser:  25,
+		MaxGuestRequestsPerUserPerHour: 100,
+		DefaultOneTime:                 true,
+		ProtectContent:                 true,
+		OwnerIDs:                       []int64{999},
+		GuestModeEnabled:               true,
+	})
+	if err != nil {
+		t.Fatalf("service.New: %v", err)
+	}
+
+	handler, err := bot.New(bot.Config{
+		Service:              useCases,
+		Telegram:             client,
+		BotUsername:          "secretmediabot",
+		MaxMediaBytes:        20 * 1024 * 1024,
+		MediaDownloadTimeout: 10 * time.Second,
+		RequestTimeout:       5 * time.Second,
+		Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("bot.New: %v", err)
+	}
+
+	ctx := context.Background()
+	sender := telegram.User{ID: 101, FirstName: "Alice", Username: "alice_user"}
+
+	// Alice creates instant whisper for Bob
+	if err := handler.HandleUpdate(ctx, telegram.Update{
+		UpdateID: 1,
+		InlineQuery: &telegram.InlineQuery{
+			ID:    "inline_q_sender",
+			From:  sender,
+			Query: `@bobby_user secret-content`,
+		},
+	}); err != nil {
+		t.Fatalf("HandleUpdate error = %v", err)
+	}
+
+	inlineAnswer := mockServer.AnsweredInlineQueries[0]
+	button := inlineAnswer.Results[0].ReplyMarkup.InlineKeyboard[0][0]
+	paramIndex := strings.Index(button.URL, "?start=")
+	startParam := button.URL[paramIndex+7:]
+
+	// Alice taps the button herself
+	aliceChat := telegram.Chat{ID: sender.ID, Type: "private"}
+	if err := handler.HandleUpdate(ctx, telegram.Update{
+		UpdateID: 2,
+		Message: &telegram.Message{
+			MessageID: 57,
+			Chat:      aliceChat,
+			From:      &sender,
+			Text:      "/start " + startParam,
+		},
+	}); err != nil {
+		t.Fatalf("HandleUpdate(Alice open own secret) error = %v", err)
+	}
+
+	foundSenderNotice := false
+	for _, msg := range mockServer.SentMessages {
+		if msg.ChatID == sender.ID && strings.Contains(msg.Text, "You are the sender of this secret") {
+			foundSenderNotice = true
+			break
+		}
+	}
+	if !foundSenderNotice {
+		t.Fatal("expected sender Alice to receive confirmation notice when clicking own secret button")
+	}
+}
+
+func TestE2EInlineInstantMultipleWordsSecret(t *testing.T) {
+	t.Parallel()
+
+	mockServer := testutil.NewTelegramMockServer("secretmediabot")
+	defer mockServer.Close()
+
+	client, err := telegram.NewClient(telegram.ClientConfig{
+		Token:   mockServer.BotToken,
+		BaseURL: mockServer.BaseURL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	keyring := newKeyring(t)
+	store := newE2EStore()
+	useCases, err := service.New(store, keyring, service.Options{
+		DraftTTL:                       time.Hour,
+		WhisperTTL:                     24 * time.Hour,
+		ContentRetention:               30 * 24 * time.Hour,
+		IngestLease:                    time.Minute,
+		OpenLease:                      30 * time.Second,
+		PublishLease:                   time.Minute,
+		EphemeralDeleteAfter:           0,
+		MaxMediaBytes:                  20 * 1024 * 1024,
+		MaxActiveDraftsPerUser:         5,
+		MaxWhispersPerUserPerHour:      50,
+		MaxActiveGuestRequestsPerUser:  25,
+		MaxGuestRequestsPerUserPerHour: 100,
+		DefaultOneTime:                 true,
+		ProtectContent:                 true,
+		OwnerIDs:                       []int64{999},
+		GuestModeEnabled:               true,
+	})
+	if err != nil {
+		t.Fatalf("service.New: %v", err)
+	}
+
+	handler, err := bot.New(bot.Config{
+		Service:              useCases,
+		Telegram:             client,
+		BotUsername:          "secretmediabot",
+		MaxMediaBytes:        20 * 1024 * 1024,
+		MediaDownloadTimeout: 10 * time.Second,
+		RequestTimeout:       5 * time.Second,
+		Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("bot.New: %v", err)
+	}
+
+	ctx := context.Background()
+	sender := telegram.User{ID: 101, FirstName: "Alice", Username: "alice_user"}
+	recipient := telegram.User{ID: 202, FirstName: "Bob", Username: "bobby_user"}
+
+	// Flow 1 test: @secretbot @targetusername secret1 secret2 secret3
+	if err := handler.HandleUpdate(ctx, telegram.Update{
+		UpdateID: 1,
+		InlineQuery: &telegram.InlineQuery{
+			ID:    "inline_q_multi",
+			From:  sender,
+			Query: `@bobby_user secret1 secret2 secret3`,
+		},
+	}); err != nil {
+		t.Fatalf("HandleUpdate(multi word secret) error = %v", err)
+	}
+
+	if len(mockServer.AnsweredInlineQueries) == 0 {
+		t.Fatal("expected AnsweredInlineQueries to not be empty")
+	}
+	inlineAnswer := mockServer.AnsweredInlineQueries[0]
+	// Should have instant text secret as first result, and media option as second result
+	if len(inlineAnswer.Results) < 2 {
+		t.Fatalf("expected at least 2 inline results (text secret & media option), got %d", len(inlineAnswer.Results))
+	}
+	button := inlineAnswer.Results[0].ReplyMarkup.InlineKeyboard[0][0]
+	paramIndex := strings.Index(button.URL, "?start=")
+	startParam := button.URL[paramIndex+7:]
+
+	// Bob decrypts the secret
+	bobChat := telegram.Chat{ID: recipient.ID, Type: "private"}
+	if err := handler.HandleUpdate(ctx, telegram.Update{
+		UpdateID: 2,
+		Message: &telegram.Message{
+			MessageID: 88,
+			Chat:      bobChat,
+			From:      &recipient,
+			Text:      "/start " + startParam,
+		},
+	}); err != nil {
+		t.Fatalf("HandleUpdate(Bob open multi word secret) error = %v", err)
+	}
+
+	foundSecret := false
+	for _, msg := range mockServer.SentMessages {
+		if msg.ChatID == recipient.ID && msg.Text == "secret1 secret2 secret3" {
+			foundSecret = true
+			break
+		}
+	}
+	if !foundSecret {
+		t.Fatal("expected Bob to receive 'secret1 secret2 secret3'")
+	}
+}
+
+func TestE2EInlineQuerySecretWithoutTargetUsingRecent(t *testing.T) {
+	t.Parallel()
+
+	mockServer := testutil.NewTelegramMockServer("secretmediabot")
+	defer mockServer.Close()
+
+	client, err := telegram.NewClient(telegram.ClientConfig{
+		Token:   mockServer.BotToken,
+		BaseURL: mockServer.BaseURL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	keyring := newKeyring(t)
+	store := newE2EStore()
+	useCases, err := service.New(store, keyring, service.Options{
+		DraftTTL:                       time.Hour,
+		WhisperTTL:                     24 * time.Hour,
+		ContentRetention:               30 * 24 * time.Hour,
+		IngestLease:                    time.Minute,
+		OpenLease:                      30 * time.Second,
+		PublishLease:                   time.Minute,
+		EphemeralDeleteAfter:           0,
+		MaxMediaBytes:                  20 * 1024 * 1024,
+		MaxActiveDraftsPerUser:         5,
+		MaxWhispersPerUserPerHour:      50,
+		MaxActiveGuestRequestsPerUser:  25,
+		MaxGuestRequestsPerUserPerHour: 100,
+		DefaultOneTime:                 true,
+		ProtectContent:                 true,
+		OwnerIDs:                       []int64{999},
+		GuestModeEnabled:               true,
+	})
+	if err != nil {
+		t.Fatalf("service.New: %v", err)
+	}
+
+	handler, err := bot.New(bot.Config{
+		Service:              useCases,
+		Telegram:             client,
+		BotUsername:          "secretmediabot",
+		MaxMediaBytes:        20 * 1024 * 1024,
+		MediaDownloadTimeout: 10 * time.Second,
+		RequestTimeout:       5 * time.Second,
+		Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("bot.New: %v", err)
+	}
+
+	ctx := context.Background()
+	sender := telegram.User{ID: 101, FirstName: "Alice", Username: "alice_user"}
+	recipient := telegram.User{ID: 202, FirstName: "JoeTheBoss", Username: "joetheboss"}
+
+	// First: Alice types @bobby_user to send a whisper, which caches JoeTheBoss as a recent target
+	if err := handler.HandleUpdate(ctx, telegram.Update{
+		UpdateID: 1,
+		InlineQuery: &telegram.InlineQuery{
+			ID:    "inline_q_first",
+			From:  sender,
+			Query: `@joetheboss initial secret message`,
+		},
+	}); err != nil {
+		t.Fatalf("HandleUpdate(initial whisper) error = %v", err)
+	}
+
+	// Second: Alice now types @secretbot secret-without-target-specified
+	if err := handler.HandleUpdate(ctx, telegram.Update{
+		UpdateID: 2,
+		InlineQuery: &telegram.InlineQuery{
+			ID:    "inline_q_without_target",
+			From:  sender,
+			Query: `secret-without-target-specified`,
+		},
+	}); err != nil {
+		t.Fatalf("HandleUpdate(secret without target) error = %v", err)
+	}
+
+	if len(mockServer.AnsweredInlineQueries) < 2 {
+		t.Fatal("expected inline answer for query without target")
+	}
+	inlineAnswer := mockServer.AnsweredInlineQueries[len(mockServer.AnsweredInlineQueries)-1]
+	if len(inlineAnswer.Results) == 0 {
+		t.Fatal("expected inline results suggesting recent target")
+	}
+
+	result := inlineAnswer.Results[0]
+	if !strings.Contains(result.Title, "joetheboss") && !strings.Contains(result.Title, "JoeTheBoss") {
+		t.Fatalf("expected title to suggest recent target joetheboss, got %q", result.Title)
+	}
+
+	button := result.ReplyMarkup.InlineKeyboard[0][0]
+	paramIndex := strings.Index(button.URL, "?start=")
+	startParam := button.URL[paramIndex+7:]
+
+	// JoeTheBoss unlocks the secret
+	joeChat := telegram.Chat{ID: recipient.ID, Type: "private"}
+	if err := handler.HandleUpdate(ctx, telegram.Update{
+		UpdateID: 3,
+		Message: &telegram.Message{
+			MessageID: 99,
+			Chat:      joeChat,
+			From:      &recipient,
+			Text:      "/start " + startParam,
+		},
+	}); err != nil {
+		t.Fatalf("HandleUpdate(JoeTheBoss open secret) error = %v", err)
+	}
+
+	foundSecret := false
+	for _, msg := range mockServer.SentMessages {
+		if msg.ChatID == recipient.ID && msg.Text == "secret-without-target-specified" {
+			foundSecret = true
+			break
+		}
+	}
+	if !foundSecret {
+		t.Fatal("expected JoeTheBoss to receive decrypted secret")
+	}
+}
+
+func TestE2EOwnerMenuAndEphemeralToggle(t *testing.T) {
+	t.Parallel()
+
+	mockServer := testutil.NewTelegramMockServer("secretmediabot")
+	defer mockServer.Close()
+
+	client, err := telegram.NewClient(telegram.ClientConfig{
+		Token:   mockServer.BotToken,
+		BaseURL: mockServer.BaseURL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	keyring := newKeyring(t)
+	store := newE2EStore()
+	ownerID := int64(999)
+	useCases, err := service.New(store, keyring, service.Options{
+		DraftTTL:                       time.Hour,
+		WhisperTTL:                     24 * time.Hour,
+		ContentRetention:               30 * 24 * time.Hour,
+		IngestLease:                    time.Minute,
+		OpenLease:                      30 * time.Second,
+		PublishLease:                   time.Minute,
+		EphemeralDeleteAfter:           0,
+		MaxMediaBytes:                  20 * 1024 * 1024,
+		MaxActiveDraftsPerUser:         5,
+		MaxWhispersPerUserPerHour:      50,
+		MaxActiveGuestRequestsPerUser:  25,
+		MaxGuestRequestsPerUserPerHour: 100,
+		DefaultOneTime:                 true,
+		ProtectContent:                 true,
+		OwnerIDs:                       []int64{ownerID},
+		GuestModeEnabled:               true,
+	})
+	if err != nil {
+		t.Fatalf("service.New: %v", err)
+	}
+
+	handler, err := bot.New(bot.Config{
+		Service:              useCases,
+		Telegram:             client,
+		BotUsername:          "secretmediabot",
+		MaxMediaBytes:        20 * 1024 * 1024,
+		MediaDownloadTimeout: 10 * time.Second,
+		RequestTimeout:       5 * time.Second,
+		Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("bot.New: %v", err)
+	}
+
+	ctx := context.Background()
+	owner := telegram.User{ID: ownerID, FirstName: "Owner", Username: "owner_user"}
+	ownerChat := telegram.Chat{ID: ownerID, Type: "private"}
+
+	// Step 1: Owner calls /owner_menu
+	if err := handler.HandleUpdate(ctx, telegram.Update{
+		UpdateID: 1,
+		Message: &telegram.Message{
+			MessageID: 1,
+			Chat:      ownerChat,
+			From:      &owner,
+			Text:      "/owner_menu",
+		},
+	}); err != nil {
+		t.Fatalf("HandleUpdate(/owner_menu) error = %v", err)
+	}
+
+	foundMenu := false
+	for _, msg := range mockServer.SentMessages {
+		if msg.ChatID == ownerID && strings.Contains(msg.Text, "Operator Menu") {
+			foundMenu = true
+			break
+		}
+	}
+	if !foundMenu {
+		t.Fatal("expected owner to receive Operator Menu")
+	}
+
+	// Step 2: Owner changes self-destruction to 1m
+	if err := handler.HandleUpdate(ctx, telegram.Update{
+		UpdateID: 2,
+		Message: &telegram.Message{
+			MessageID: 2,
+			Chat:      ownerChat,
+			From:      &owner,
+			Text:      "/owner_ephemeral 1m",
+		},
+	}); err != nil {
+		t.Fatalf("HandleUpdate(/owner_ephemeral 1m) error = %v", err)
+	}
+
+	if useCases.GetEphemeralDeleteAfter() != time.Minute {
+		t.Fatalf("expected EphemeralDeleteAfter to be 1m, got %s", useCases.GetEphemeralDeleteAfter())
+	}
+
+	// Step 3: Owner disables self-destruction
+	if err := handler.HandleUpdate(ctx, telegram.Update{
+		UpdateID: 3,
+		Message: &telegram.Message{
+			MessageID: 3,
+			Chat:      ownerChat,
+			From:      &owner,
+			Text:      "/owner_ephemeral off",
+		},
+	}); err != nil {
+		t.Fatalf("HandleUpdate(/owner_ephemeral off) error = %v", err)
+	}
+
+	if useCases.GetEphemeralDeleteAfter() != 0 {
+		t.Fatalf("expected EphemeralDeleteAfter to be 0 (disabled), got %s", useCases.GetEphemeralDeleteAfter())
 	}
 }

@@ -24,6 +24,10 @@ func (h *Handler) handleOwnerCommand(
 		return h.sendReply(ctx, message, "This command is owner-only.", nil)
 	}
 	switch parsed.Name {
+	case "owner_menu":
+		return h.ownerMenu(ctx, message, owner.TelegramUserID)
+	case "owner_ephemeral":
+		return h.ownerEphemeral(ctx, message, parsed.Args)
 	case "owner_list":
 		return h.ownerList(ctx, message, owner.TelegramUserID, parsed.Args)
 	case "owner_open":
@@ -35,6 +39,55 @@ func (h *Handler) handleOwnerCommand(
 	default:
 		return nil
 	}
+}
+
+func (h *Handler) ownerMenu(ctx context.Context, message telegram.Message, ownerID int64) error {
+	ephemeral := h.service.GetEphemeralDeleteAfter()
+	ephemeralText := "Disabled (secrets persist until global retention expires)"
+	if ephemeral > 0 {
+		ephemeralText = fmt.Sprintf("Enabled (auto-deletes %s after open)", ephemeral)
+	}
+
+	text := fmt.Sprintf(`🛡️ Secret Media Bot — Operator Menu
+
+⏱️ Self-Destruction on Open: %s
+• /owner_ephemeral off — Turn self-destruction off
+• /owner_ephemeral 30s — Auto-delete 30s after open
+• /owner_ephemeral 1m — Auto-delete 1m after open
+• /owner_ephemeral 5m — Auto-delete 5m after open
+• /owner_ephemeral <duration> — Custom duration (e.g. 10m)
+
+📋 Auditing & Whisper Management:
+• /owner_list [limit] [offset] — List recent whispers (metadata only)
+• /owner_open <whisper-uuid> — Review decrypted whisper payload
+• /owner_delete <whisper-uuid> — Hard-delete whisper and payload
+• /owner_retain <whisper-uuid> <duration> — Adjust retention window`, ephemeralText)
+
+	return h.sendReply(ctx, message, text, nil)
+}
+
+func (h *Handler) ownerEphemeral(ctx context.Context, message telegram.Message, args string) error {
+	arg := strings.TrimSpace(strings.ToLower(args))
+	if arg == "" {
+		ephemeral := h.service.GetEphemeralDeleteAfter()
+		if ephemeral <= 0 {
+			return h.sendReply(ctx, message, "Self-destruction on open is currently DISABLED.", nil)
+		}
+		return h.sendReply(ctx, message, fmt.Sprintf("Self-destruction on open is currently set to %s.", ephemeral), nil)
+	}
+
+	if arg == "off" || arg == "disable" || arg == "disabled" || arg == "0" || arg == "0s" {
+		h.service.SetEphemeralDeleteAfter(0)
+		return h.sendReply(ctx, message, "Self-destruction on open has been DISABLED.", nil)
+	}
+
+	dur, err := time.ParseDuration(arg)
+	if err != nil || dur <= 0 {
+		return h.sendReply(ctx, message, "Invalid duration. Use 'off' or a positive duration like '30s', '1m', '5m'.", nil)
+	}
+
+	h.service.SetEphemeralDeleteAfter(dur)
+	return h.sendReply(ctx, message, fmt.Sprintf("Self-destruction on open is now set to %s.", dur), nil)
 }
 
 func (h *Handler) ownerList(ctx context.Context, message telegram.Message, ownerID int64, args string) error {

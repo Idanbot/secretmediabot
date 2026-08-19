@@ -123,7 +123,7 @@ func (h *Handler) handlePrivateMessage(ctx context.Context, message telegram.Mes
 			return h.sendReply(ctx, message, privacyText, nil)
 		case "cancel":
 			return h.handleCancel(ctx, message, sender)
-		case "owner_list", "owner_open", "owner_delete", "owner_retain":
+		case "owner_list", "owner_open", "owner_delete", "owner_retain", "owner_menu", "owner_ephemeral":
 			return h.handleOwnerCommand(ctx, message, sender, parsed)
 		default:
 			return h.sendReply(ctx, message, "Unknown command. Use /help.", nil)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -73,13 +74,15 @@ type Options struct {
 }
 
 type Service struct {
-	store      Store
-	guestStore GuestStore
-	cipher     *secretcrypto.Keyring
-	options    Options
-	now        func() time.Time
-	allowed    map[int64]struct{}
-	owners     map[int64]struct{}
+	store              Store
+	guestStore         GuestStore
+	cipher             *secretcrypto.Keyring
+	options            Options
+	now                func() time.Time
+	allowed            map[int64]struct{}
+	owners             map[int64]struct{}
+	mu                 sync.RWMutex
+	recentTargetsCache map[int64][]domain.RecentTarget
 }
 
 func New(store Store, cipher *secretcrypto.Keyring, options Options) (*Service, error) {
@@ -88,7 +91,7 @@ func New(store Store, cipher *secretcrypto.Keyring, options Options) (*Service, 
 	}
 	if options.DraftTTL <= 0 || options.WhisperTTL <= 0 || options.ContentRetention <= 0 ||
 		options.IngestLease <= 0 || options.OpenLease <= 0 || options.PublishLease <= 0 ||
-		options.EphemeralDeleteAfter <= 0 || options.MaxMediaBytes <= 0 ||
+		options.EphemeralDeleteAfter < 0 || options.MaxMediaBytes <= 0 ||
 		options.MaxActiveDraftsPerUser <= 0 || options.MaxWhispersPerUserPerHour <= 0 ||
 		options.MaxActiveGuestRequestsPerUser <= 0 || options.MaxGuestRequestsPerUserPerHour <= 0 {
 		return nil, errors.New("service durations and limits must be positive")
@@ -114,7 +117,83 @@ func New(store Store, cipher *secretcrypto.Keyring, options Options) (*Service, 
 	return &Service{
 		store: store, guestStore: guestStore, cipher: cipher, options: options,
 		now: func() time.Time { return time.Now().UTC() }, allowed: allowed, owners: owners,
+		recentTargetsCache: make(map[int64][]domain.RecentTarget),
 	}, nil
+}
+
+func (s *Service) GetEphemeralDeleteAfter() time.Duration {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.options.EphemeralDeleteAfter
+}
+
+func (s *Service) SetEphemeralDeleteAfter(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if d < 0 {
+		d = 0
+	}
+	s.options.EphemeralDeleteAfter = d
+}
+
+func (s *Service) GetRecentTargets(ctx context.Context, senderID int64, limit int) ([]domain.RecentTarget, error) {
+	if limit <= 0 {
+		limit = 3
+	}
+	s.mu.RLock()
+	var (
+		cached []domain.RecentTarget
+		ok     bool
+	)
+	if s.recentTargetsCache != nil {
+		cached, ok = s.recentTargetsCache[senderID]
+	}
+	s.mu.RUnlock()
+	if ok && len(cached) > 0 {
+		if len(cached) > limit {
+			return cached[:limit], nil
+		}
+		return cached, nil
+	}
+
+	if s.guestStore != nil {
+		targets, err := s.guestStore.FindRecentTargetsForSender(ctx, senderID, limit)
+		if err == nil && len(targets) > 0 {
+			s.mu.Lock()
+			if s.recentTargetsCache == nil {
+				s.recentTargetsCache = make(map[int64][]domain.RecentTarget)
+			}
+			s.recentTargetsCache[senderID] = targets
+			s.mu.Unlock()
+			return targets, nil
+		}
+	}
+	return nil, nil
+}
+
+func (s *Service) RecordRecentTarget(senderID int64, target domain.RecentTarget) {
+	if senderID <= 0 || (target.TargetUserID <= 0 && target.TargetUsername == "") {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.recentTargetsCache == nil {
+		s.recentTargetsCache = make(map[int64][]domain.RecentTarget)
+	}
+	current := s.recentTargetsCache[senderID]
+	var updated []domain.RecentTarget
+	updated = append(updated, target)
+	for _, item := range current {
+		if (target.TargetUserID > 0 && item.TargetUserID == target.TargetUserID) ||
+			(target.TargetUsername != "" && strings.EqualFold(item.TargetUsername, target.TargetUsername)) {
+			continue
+		}
+		updated = append(updated, item)
+		if len(updated) >= 5 {
+			break
+		}
+	}
+	s.recentTargetsCache[senderID] = updated
 }
 
 func (s *Service) IsOwner(telegramUserID int64) bool {

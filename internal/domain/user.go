@@ -44,3 +44,36 @@ func (u User) DisplayName() string {
 func (u User) NormalizedUsername() string {
 	return strings.ToLower(strings.TrimLeft(strings.TrimSpace(u.Username), "@"))
 }
+
+// RecentTarget represents a target recipient recently used by a sender.
+type RecentTarget struct {
+	TargetUserID   int64
+	TargetUsername string
+	DisplayName    string
+	LastUsedAt     time.Time
+}
+
+// TargetIdentifier returns the @username or numeric ID string.
+func (r RecentTarget) TargetIdentifier() string {
+	if r.TargetUsername != "" {
+		if strings.HasPrefix(r.TargetUsername, "@") {
+			return r.TargetUsername
+		}
+		return "@" + r.TargetUsername
+	}
+	if r.TargetUserID > 0 {
+		return strconv.FormatInt(r.TargetUserID, 10)
+	}
+	return ""
+}
+
+// Label returns a user-friendly label like "JoeTheBoss (@joetheboss)" or "Alice".
+func (r RecentTarget) Label() string {
+	if r.DisplayName != "" {
+		if r.TargetUsername != "" && !strings.EqualFold(r.DisplayName, "@"+r.TargetUsername) && !strings.EqualFold(r.DisplayName, r.TargetUsername) {
+			return r.DisplayName + " (@" + strings.TrimPrefix(r.TargetUsername, "@") + ")"
+		}
+		return r.DisplayName
+	}
+	return r.TargetIdentifier()
+}

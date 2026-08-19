@@ -208,9 +208,6 @@ func (s *Store) CompleteOpen(ctx context.Context, params CompleteOpenParams) err
 		if event.DeliveryState != "reserved" {
 			return ErrConflict
 		}
-		if !params.DeleteAt.After(now) {
-			return fmt.Errorf("%w: a new completed open requires a future deletion deadline", ErrInvalidInput)
-		}
 		updates := map[string]any{"opened_at": gorm.Expr("COALESCE(opened_at, ?)", now), "updated_at": now}
 		if whisper.OneTime {
 			if whisper.Status != string(domain.WhisperOpening) || whisper.OpeningCallbackQueryID == nil ||
@@ -238,19 +235,21 @@ func (s *Store) CompleteOpen(ctx context.Context, params CompleteOpenParams) err
 			return ErrConflict
 		}
 
-		job := ephemeralDeleteJobRow{
-			ChatID:             whisper.SourceChatID,
-			RecipientID:        whisper.RecipientID,
-			EphemeralMessageID: *params.EphemeralMessageID,
-			WhisperID:          cloneUUIDPointer(&whisper.ID),
-			DeleteAfter:        params.DeleteAt.UTC(),
-			NextAttemptAt:      params.DeleteAt.UTC(),
-			AttemptCount:       0,
-			CreatedAt:          now,
-			UpdatedAt:          now,
-		}
-		if err := tx.Create(&job).Error; err != nil {
-			return translateError(err)
+		if params.DeleteAt.After(now) {
+			job := ephemeralDeleteJobRow{
+				ChatID:             whisper.SourceChatID,
+				RecipientID:        whisper.RecipientID,
+				EphemeralMessageID: *params.EphemeralMessageID,
+				WhisperID:          cloneUUIDPointer(&whisper.ID),
+				DeleteAfter:        params.DeleteAt.UTC(),
+				NextAttemptAt:      params.DeleteAt.UTC(),
+				AttemptCount:       0,
+				CreatedAt:          now,
+				UpdatedAt:          now,
+			}
+			if err := tx.Create(&job).Error; err != nil {
+				return translateError(err)
+			}
 		}
 		return nil
 	})

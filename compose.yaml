@@ -3,6 +3,7 @@ services:
     # CI publishes immutable GHCR references. Set BOT_IMAGE_REF to the digest
     # artifact for deployment; the tag fallback keeps local development simple.
     image: ${BOT_IMAGE_REF:-ghcr.io/idanbot/secretmediabot:latest}
+    pull_policy: ${PULL_POLICY:-always}
     build:
       context: .
       dockerfile: Dockerfile

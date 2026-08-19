@@ -73,25 +73,48 @@ func (h *Handler) handleInlineQuery(ctx context.Context, query telegram.InlineQu
 	if h.guest == nil || query.ID == "" {
 		return nil
 	}
-	raw := strings.TrimSpace(query.Query)
-	if raw == "" {
-		return h.answerInlineHelp(ctx, query.ID)
-	}
-	target, secretText, err := parseInlineQuery(raw)
-	if err != nil {
-		return h.answerInlineHelp(ctx, query.ID)
-	}
 	if query.From.ID <= 0 || query.From.IsBot {
 		return h.answerInlineNotice(ctx, query.ID, "⚠️ Unauthorized", "Only human users can create locked secrets.")
 	}
 
-	var (
-		session  service.GuestSession
-		articles []telegram.InlineQueryResultArticle
-	)
+	raw := strings.TrimSpace(query.Query)
+	if raw == "" {
+		return h.answerInlineHelp(ctx, query.From.ID, query.ID)
+	}
+
+	target, secretText, err := parseInlineQuery(raw)
+	if err != nil {
+		// Target not specified as first word. Check if user typed @bot [secret] to send to a recent target!
+		recents, _ := h.guest.GetRecentTargets(ctx, query.From.ID, 3)
+		if len(recents) > 0 {
+			var articles []telegram.InlineQueryResultArticle
+			for _, recent := range recents {
+				recentTarget := targetFromRecent(recent)
+				session, err := h.guest.CreateGuestInlineSecret(ctx, service.CreateGuestInlineParams{
+					Sender: domainUser(query.From), Target: recentTarget, Text: raw, InlineQueryID: query.ID,
+				})
+				if err == nil {
+					articles = append(articles, h.guestInlineArticleWithLabel(session, recentTarget, recent.Label(), raw, inlineResultID(h.botUsername, query.From.ID, recentTarget, raw)))
+				}
+			}
+			if len(articles) > 0 {
+				requestCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
+				err = h.telegram.AnswerInlineQuery(requestCtx, telegram.AnswerInlineQueryRequest{
+					InlineQueryID: query.ID, Results: articles,
+					CacheTime: inlineResultCacheSeconds, IsPersonal: true,
+				})
+				cancel()
+				return err
+			}
+		}
+		return h.answerInlineHelp(ctx, query.From.ID, query.ID)
+	}
+
+	var articles []telegram.InlineQueryResultArticle
 
 	if secretText != "" {
-		session, err = h.guest.CreateGuestInlineSecret(ctx, service.CreateGuestInlineParams{
+		// Flow 1: Instant Text Secret
+		session, err := h.guest.CreateGuestInlineSecret(ctx, service.CreateGuestInlineParams{
 			Sender: domainUser(query.From), Target: target, Text: secretText, InlineQueryID: query.ID,
 		})
 		if err != nil {
@@ -101,8 +124,17 @@ func (h *Handler) handleInlineQuery(ctx context.Context, query telegram.InlineQu
 		articles = []telegram.InlineQueryResultArticle{
 			h.guestInlineArticle(session, target, secretText, inlineResultID(h.botUsername, query.From.ID, target, secretText)),
 		}
+
+		// Flow 2: Media option as secondary
+		mediaSession, err := h.guest.CreateGuestRequest(ctx, service.CreateGuestRequestParams{
+			Sender: domainUser(query.From), Target: target, InlineQueryID: query.ID + "-media",
+		})
+		if err == nil {
+			articles = append(articles, h.guestArticle(mediaSession, target, inlineResultID(h.botUsername, query.From.ID, target, "media")))
+		}
 	} else {
-		session, err = h.guest.CreateGuestRequest(ctx, service.CreateGuestRequestParams{
+		// Flow 2: Media / DM Secret (target specified without secret text)
+		session, err := h.guest.CreateGuestRequest(ctx, service.CreateGuestRequestParams{
 			Sender: domainUser(query.From), Target: target, InlineQueryID: query.ID,
 		})
 		if err != nil {
@@ -142,6 +174,19 @@ func (h *Handler) inlineTypeSecretHint(target command.Target) telegram.InlineQue
 	}
 }
 
+func targetFromRecent(r domain.RecentTarget) command.Target {
+	if r.TargetUsername != "" {
+		return command.Target{
+			Kind:     command.TargetUsername,
+			Username: strings.TrimPrefix(r.TargetUsername, "@"),
+		}
+	}
+	return command.Target{
+		Kind:   command.TargetUserID,
+		UserID: r.TargetUserID,
+	}
+}
+
 func parseInlineQuery(query string) (command.Target, string, error) {
 	query = strings.TrimSpace(query)
 	fields := strings.Fields(query)
@@ -154,9 +199,26 @@ func parseInlineQuery(query string) (command.Target, string, error) {
 	}
 	var secretText string
 	if len(fields) > 1 {
-		secretText = strings.TrimSpace(query[len(fields[0]):])
+		secretText = cleanSecretText(query[len(fields[0]):])
 	}
 	return target, secretText, nil
+}
+
+func cleanSecretText(s string) string {
+	s = strings.TrimSpace(s)
+	runes := []rune(s)
+	if len(runes) >= 2 {
+		first := runes[0]
+		last := runes[len(runes)-1]
+		if (first == '"' && last == '"') ||
+			(first == '\'' && last == '\'') ||
+			(first == '`' && last == '`') ||
+			(first == '“' && last == '”') ||
+			(first == '‘' && last == '’') {
+			s = strings.TrimSpace(string(runes[1 : len(runes)-1]))
+		}
+	}
+	return s
 }
 
 // inlineResultID derives a stable inline result ID from query parameters.
@@ -193,6 +255,24 @@ func (h *Handler) guestInlineArticle(session service.GuestSession, target comman
 	}
 }
 
+func (h *Handler) guestInlineArticleWithLabel(session service.GuestSession, target command.Target, label, text, resultID string) telegram.InlineQueryResultArticle {
+	preview := text
+	if runes := []rune(preview); len(runes) > 40 {
+		preview = string(runes[:40]) + "..."
+	}
+	link := composeURL(h.botUsername, session.Parameter)
+	return telegram.InlineQueryResultArticle{
+		Type: "article", ID: resultID, Title: fmt.Sprintf("🔒 Send to %s", label),
+		Description: fmt.Sprintf("Secret: %q (tap to send locked whisper)", preview),
+		InputMessageContent: telegram.InputTextMessageContent{
+			MessageText: fmt.Sprintf("🔒 Secret whisper for %s.\nOnly they can unlock and view this secret.", label),
+		},
+		ReplyMarkup: &telegram.InlineKeyboardMarkup{InlineKeyboard: [][]telegram.InlineKeyboardButton{{
+			{Text: "🔓 Open Secret", URL: link},
+		}}},
+	}
+}
+
 func (h *Handler) guestArticle(session service.GuestSession, target command.Target, resultID string) telegram.InlineQueryResultArticle {
 	targetText := target.Username
 	if target.Kind == command.TargetUserID {
@@ -203,7 +283,7 @@ func (h *Handler) guestArticle(session service.GuestSession, target command.Targ
 	description := "Tap to post envelope, then sender taps button to add secret in DM."
 	link := composeURL(h.botUsername, session.Parameter)
 	return telegram.InlineQueryResultArticle{
-		Type: "article", ID: resultID, Title: fmt.Sprintf("🔒 Add Secret in DM for %s (Media/Text)", targetText),
+		Type: "article", ID: resultID, Title: fmt.Sprintf("🖼️ / 📁 Send Media Whisper to %s (Photo, Video, File)", targetText),
 		Description: description,
 		InputMessageContent: telegram.InputTextMessageContent{
 			MessageText: fmt.Sprintf("🔒 Locked secret envelope for %s.\nSender: click the button below to add your secret privately in DM.\nRecipient: click to open once added.", targetText),
@@ -214,32 +294,52 @@ func (h *Handler) guestArticle(session service.GuestSession, target command.Targ
 	}
 }
 
-func (h *Handler) answerInlineHelp(ctx context.Context, queryID string) error {
+func (h *Handler) answerInlineHelp(ctx context.Context, senderID int64, queryID string) error {
 	requestCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
 	defer cancel()
 	bot := "@" + h.botUsername
-	return h.telegram.AnswerInlineQuery(requestCtx, telegram.AnswerInlineQueryRequest{
-		InlineQueryID: queryID, CacheTime: 0, IsPersonal: true,
-		Results: []telegram.InlineQueryResultArticle{
-			{
+	var articles []telegram.InlineQueryResultArticle
+
+	if senderID > 0 && h.guest != nil {
+		recents, _ := h.guest.GetRecentTargets(ctx, senderID, 3)
+		for _, r := range recents {
+			targetID := r.TargetIdentifier()
+			articles = append(articles, telegram.InlineQueryResultArticle{
 				Type:        "article",
-				ID:          "inline-help-instant",
-				Title:       "1️⃣ Instant Text Whisper (1 Step)",
-				Description: bot + " @recipient <your secret message>",
+				ID:          "recent-" + targetID,
+				Title:       fmt.Sprintf("👤 Send to %s", r.Label()),
+				Description: fmt.Sprintf("Tap to whisper to %s", r.Label()),
 				InputMessageContent: telegram.InputTextMessageContent{
-					MessageText: "To send an instant secret whisper:\n" + bot + " @recipient your secret message",
+					MessageText: fmt.Sprintf("To send a secret whisper to %s:\n%s %s your secret message", r.Label(), bot, targetID),
 				},
-			},
-			{
-				Type:        "article",
-				ID:          "inline-help-media",
-				Title:       "2️⃣ Media/DM Whisper (2 Steps)",
-				Description: bot + " @recipient (tap to post envelope, then add photo/media in DM)",
-				InputMessageContent: telegram.InputTextMessageContent{
-					MessageText: "To send a media whisper:\n" + bot + " @recipient",
-				},
+			})
+		}
+	}
+
+	articles = append(articles,
+		telegram.InlineQueryResultArticle{
+			Type:        "article",
+			ID:          "inline-help-instant",
+			Title:       "1️⃣ Instant Text Whisper (1 Step)",
+			Description: bot + " @recipient <your secret message>",
+			InputMessageContent: telegram.InputTextMessageContent{
+				MessageText: "To send an instant secret whisper:\n" + bot + " @recipient your secret message",
 			},
 		},
+		telegram.InlineQueryResultArticle{
+			Type:        "article",
+			ID:          "inline-help-media",
+			Title:       "2️⃣ Media/DM Whisper (2 Steps)",
+			Description: bot + " @recipient (tap to post envelope, then add photo/media in DM)",
+			InputMessageContent: telegram.InputTextMessageContent{
+				MessageText: "To send a media whisper:\n" + bot + " @recipient",
+			},
+		},
+	)
+
+	return h.telegram.AnswerInlineQuery(requestCtx, telegram.AnswerInlineQueryRequest{
+		InlineQueryID: queryID, CacheTime: 0, IsPersonal: true,
+		Results: articles,
 	})
 }
 

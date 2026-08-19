@@ -202,6 +202,12 @@ func (f *fakeUseCases) OwnerSetRetention(ctx context.Context, ownerID int64, id 
 	return nil
 }
 
+func (f *fakeUseCases) GetEphemeralDeleteAfter() time.Duration {
+	return 0
+}
+
+func (f *fakeUseCases) SetEphemeralDeleteAfter(d time.Duration) {}
+
 type fakeTelegram struct {
 	sendMessage              func(context.Context, telegram.SendMessageRequest) (telegram.Message, error)
 	answerCallback           func(context.Context, telegram.AnswerCallbackQueryRequest) error
@@ -1013,6 +1019,40 @@ func TestOwnerCommandsAuthorizeReviewAndDelete(t *testing.T) {
 		}
 		if deleted != whisperID || len(tg.messages) != 1 || !strings.Contains(tg.messages[0].Text, "deleted") {
 			t.Fatalf("delete/messages = %s/%#v", deleted, tg.messages)
+		}
+	})
+
+	t.Run("menu", func(t *testing.T) {
+		useCases := &fakeUseCases{
+			isOwner: func(int64) bool { return true },
+		}
+		tg := &fakeTelegram{}
+		if err := testHandler(useCases, tg).HandleUpdate(context.Background(), privateUpdate(101, "/owner_menu")); err != nil {
+			t.Fatalf("HandleUpdate(/owner_menu) error = %v", err)
+		}
+		if len(tg.messages) != 1 || !strings.Contains(tg.messages[0].Text, "Operator Menu") {
+			t.Fatalf("menu messages = %#v", tg.messages)
+		}
+	})
+
+	t.Run("ephemeral_toggle", func(t *testing.T) {
+		useCases := &fakeUseCases{
+			isOwner: func(int64) bool { return true },
+		}
+		tg := &fakeTelegram{}
+		h := testHandler(useCases, tg)
+		if err := h.HandleUpdate(context.Background(), privateUpdate(101, "/owner_ephemeral 1m")); err != nil {
+			t.Fatalf("HandleUpdate(/owner_ephemeral 1m) error = %v", err)
+		}
+		if len(tg.messages) != 1 || !strings.Contains(tg.messages[0].Text, "1m") {
+			t.Fatalf("ephemeral response = %#v", tg.messages)
+		}
+		tg.messages = nil
+		if err := h.HandleUpdate(context.Background(), privateUpdate(101, "/owner_ephemeral off")); err != nil {
+			t.Fatalf("HandleUpdate(/owner_ephemeral off) error = %v", err)
+		}
+		if len(tg.messages) != 1 || !strings.Contains(tg.messages[0].Text, "DISABLED") {
+			t.Fatalf("ephemeral off response = %#v", tg.messages)
 		}
 	})
 }

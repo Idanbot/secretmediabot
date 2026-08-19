@@ -42,8 +42,8 @@ func TestLoadFromLookupUsesSecureDefaultsAndNormalizesLists(t *testing.T) {
 	if cfg.Whisper.PublishInterval != 2*time.Second {
 		t.Fatalf("PublishInterval = %s, want 2s", cfg.Whisper.PublishInterval)
 	}
-	if cfg.Whisper.EphemeralDeleteAfter != 30*time.Second || cfg.Whisper.EphemeralDeleteInterval != 2*time.Second {
-		t.Fatalf("ephemeral delete defaults = %s/%s, want 30s/2s", cfg.Whisper.EphemeralDeleteAfter, cfg.Whisper.EphemeralDeleteInterval)
+	if cfg.Whisper.EphemeralDeleteAfter != 0 || cfg.Whisper.EphemeralDeleteInterval != 2*time.Second {
+		t.Fatalf("ephemeral delete defaults = %s/%s, want 0s/2s", cfg.Whisper.EphemeralDeleteAfter, cfg.Whisper.EphemeralDeleteInterval)
 	}
 	if cfg.Media.Retention != 30*24*time.Hour {
 		t.Fatalf("Media.Retention = %s, want 720h", cfg.Media.Retention)
@@ -239,9 +239,9 @@ func TestLoadFromLookupRejectsInvalidConfiguration(t *testing.T) {
 			wantErrPart: "PUBLISH_LEASE_TIMEOUT",
 		},
 		{
-			name: "disabled ephemeral deletion",
+			name: "negative ephemeral deletion",
 			change: func(env map[string]string) {
-				env["EPHEMERAL_DELETE_AFTER"] = "0s"
+				env["EPHEMERAL_DELETE_AFTER"] = "-5s"
 			},
 			wantErrPart: "ephemeral deletion",
 		},

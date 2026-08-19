@@ -172,31 +172,31 @@ Copy `.env.example` to `.env`. Core configuration variables:
 
 ### How to send a whisper
 
-You can send whispers using either **Inline mode (any chat/group)** or **Group command mode**:
+You can send whispers using **Inline mode in ANY chat/group (the bot does NOT need to be in the chat!)** or **Group command mode**:
 
 #### Flow 1: Instant Inline Whisper (1 Step — Text)
-Use this to send an encrypted text whisper directly from any group or chat without opening a DM first:
-1. In any chat, type the bot username, the target `@username` or numeric ID, and your message:
+Send an encrypted text whisper directly from any group, channel discussion, or direct chat:
+1. In any chat, type the bot username, the target `@username` or numeric ID, and your message (with or without quotes):
    ```text
-   @secretmediabot @recipient_username Here is the confidential password: 12345
+   @yourbot @recipient_username "Here is the confidential password: 12345"
    ```
 2. Tap the inline result popup **🔒 Send instant secret to @recipient_username**.
-3. Telegram posts the locked envelope with a **`[ 🔓 Open Secret ]`** button.
-4. The recipient taps the button to decrypt and view the secret immediately.
+3. Telegram posts the locked envelope into the chat with a **`[ 🔓 Open Secret ]`** button.
+4. **Recipient Action**: Only the recipient can tap the button to decrypt and view the secret immediately in private.
 
-#### Flow 2: Media / DM Whisper (2 Steps — Photos, Videos, Voice, Files, Text)
-Use this to whisper media attachments or long messages:
-1. In any chat, type the bot username and the target without trailing text:
+#### Flow 2: Media / DM Whisper (2 Steps — Photos, Videos, Voice, Files, Long Text)
+Send media attachments or compose privately in DM:
+1. In any chat, type the bot username and the target without secret text:
    ```text
-   @secretmediabot @recipient_username
+   @yourbot @recipient_username
    ```
-2. Tap the inline result popup **🔒 Secret envelope for @recipient_username (add in DM)** to post the envelope into the chat.
+2. Tap the inline result popup **🖼️ / 📁 Add Media/Text in DM for @recipient_username** to post the envelope into the chat.
 3. **Sender Action First**: Tap the **`[ ➕ Add or open privately ]`** button on the envelope to open a private composer with the bot in DM.
 4. Send your photo, video, voice note, audio file, document (up to 20 MiB), or secret text with an optional caption.
-5. **Recipient Action**: Once the sender uploads the secret, the recipient taps the envelope button to decrypt and view the secret.
+5. **Recipient Action**: Once the sender uploads the secret, the recipient taps the envelope button in the group to decrypt and view the secret.
 
-#### Flow 3: Group Command Mode
-1. In a shared group with the bot, reply to a user's message with `/whisper`, or type `/whisper @username` / `/whisper 123456789`.
+#### Flow 3: Group Command Mode (Optional, if bot is added to the group)
+1. In a shared group where the bot is a member, reply to a user's message with `/whisper`, or type `/whisper @username` / `/whisper 123456789`.
 2. The bot opens a private composer with you in DM.
 3. Send your secret content in the DM.
 4. The bot posts the content-free envelope in the group with an **`Open secret`** callback button for the recipient.
