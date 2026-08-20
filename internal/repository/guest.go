@@ -206,8 +206,8 @@ type guestRequestRow struct {
 	SourceChatID       *int64     `gorm:"column:source_chat_id"`
 	SourceThreadID     *int64     `gorm:"column:source_thread_id"`
 	SourceMessageID    *int64     `gorm:"column:source_message_id"`
-	GuestQueryID       string     `gorm:"column:guest_query_id"`
-	InlineQueryID      string     `gorm:"column:inline_query_id"`
+	GuestQueryID       *string    `gorm:"column:guest_query_id"`
+	InlineQueryID      *string    `gorm:"column:inline_query_id"`
 	InlineMessageID    string     `gorm:"column:inline_message_id"`
 	State              string     `gorm:"column:state"`
 	PayloadKind        *string    `gorm:"column:payload_kind"`
@@ -325,10 +325,10 @@ func (s *Store) CreateGuestRequest(ctx context.Context, params GuestCreateParams
 					row.ExpiresAt = request.ExpiresAt
 					row.UpdatedAt = now
 					if request.GuestQueryID != "" {
-						row.GuestQueryID = request.GuestQueryID
+						row.GuestQueryID = optionalString(request.GuestQueryID)
 					}
 					if request.InlineQueryID != "" {
-						row.InlineQueryID = request.InlineQueryID
+						row.InlineQueryID = optionalString(request.InlineQueryID)
 					}
 					return nil
 				}
@@ -376,6 +376,9 @@ func (s *Store) CreateGuestRequest(ctx context.Context, params GuestCreateParams
 				return err
 			}
 		}
+		if err := tx.Create(&row).Error; err != nil {
+			return err
+		}
 		if params.TextPayload != nil {
 			if err := validateGuestPayload(*params.TextPayload, now); err != nil {
 				return err
@@ -385,7 +388,7 @@ func (s *Store) CreateGuestRequest(ctx context.Context, params GuestCreateParams
 				return translateError(err)
 			}
 		}
-		return tx.Create(&row).Error
+		return nil
 	})
 	if err != nil {
 		return GuestRequest{}, translateError(err)
@@ -904,8 +907,8 @@ func guestRequestRowFromDomain(request GuestRequest) guestRequestRow {
 		ID: request.ID, TokenHash: cloneBytes(request.TokenHash), SenderID: request.SenderID,
 		TargetUserID: cloneInt64Pointer(request.TargetUserID), TargetUsername: request.TargetUsername,
 		SourceChatID: cloneInt64Pointer(request.SourceChatID), SourceThreadID: cloneInt64Pointer(request.SourceThreadID),
-		SourceMessageID: cloneInt64Pointer(request.SourceMessageID), GuestQueryID: request.GuestQueryID,
-		InlineQueryID: request.InlineQueryID, InlineMessageID: request.InlineMessageID, State: request.State,
+		SourceMessageID: cloneInt64Pointer(request.SourceMessageID), GuestQueryID: optionalString(request.GuestQueryID),
+		InlineQueryID: optionalString(request.InlineQueryID), InlineMessageID: request.InlineMessageID, State: request.State,
 		PayloadKind: payloadKind, MediaType: mediaType, TelegramFileID: optionalString(request.TelegramFileID),
 		TelegramFileUnique: optionalString(request.TelegramFileUnique), TelegramContent: optionalString(request.TelegramContent),
 		TargetClaimedAt: request.TargetClaimedAt, IngestStartedAt: request.IngestStartedAt,
@@ -920,7 +923,7 @@ func (r guestRequestRow) toGuestRequest() GuestRequest {
 	request := GuestRequest{
 		ID: r.ID, TokenHash: cloneBytes(r.TokenHash), SenderID: r.SenderID, TargetUserID: cloneInt64Pointer(r.TargetUserID),
 		TargetUsername: r.TargetUsername, SourceChatID: cloneInt64Pointer(r.SourceChatID), SourceThreadID: cloneInt64Pointer(r.SourceThreadID),
-		SourceMessageID: cloneInt64Pointer(r.SourceMessageID), GuestQueryID: r.GuestQueryID, InlineQueryID: r.InlineQueryID,
+		SourceMessageID: cloneInt64Pointer(r.SourceMessageID), GuestQueryID: stringValue(r.GuestQueryID), InlineQueryID: stringValue(r.InlineQueryID),
 		InlineMessageID: r.InlineMessageID, State: r.State, TelegramFileID: stringValue(r.TelegramFileID),
 		TelegramFileUnique: stringValue(r.TelegramFileUnique), TelegramContent: stringValue(r.TelegramContent), TargetClaimedAt: cloneTimePointer(r.TargetClaimedAt),
 		IngestStartedAt: cloneTimePointer(r.IngestStartedAt), IngestLeaseUntil: cloneTimePointer(r.IngestLeaseUntil), SecretReadyAt: cloneTimePointer(r.SecretReadyAt),
