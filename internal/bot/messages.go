@@ -356,6 +356,20 @@ func (h *Handler) deliverGuestSecret(ctx context.Context, message telegram.Messa
 			ChatID: sender.TelegramUserID, Type: delivery.Content.Media.Type,
 			FileID: delivery.Content.Media.TelegramFileID, Caption: string(delivery.Content.Caption), ProtectContent: true,
 		})
+		if err != nil && telegram.IsPermanent(err) {
+			data, mediaType, contentType, fallbackErr := h.guest.GuestMediaFallback(requestCtx, delivery.Request.ID)
+			if fallbackErr != nil {
+				err = errors.Join(err, fallbackErr)
+			} else if int64(len(data)) != delivery.Content.Media.PlaintextSize {
+				err = errors.New("retained guest media size mismatch")
+			} else {
+				sent, err = h.telegram.SendPrivateMedia(requestCtx, telegram.SendPrivateMediaRequest{
+					ChatID: sender.TelegramUserID, Type: mediaType, Data: data,
+					ContentType: contentType, Caption: string(delivery.Content.Caption), ProtectContent: true,
+				})
+			}
+			secretcrypto.Zero(data)
+		}
 	} else {
 		err = errors.New("guest delivery has no supported content")
 	}
@@ -372,7 +386,11 @@ func (h *Handler) deliverGuestSecret(ctx context.Context, message telegram.Messa
 	if err := h.guest.CompleteGuestOpen(ctx, delivery, sent.MessageID); err != nil {
 		return err
 	}
-	return h.sendReply(ctx, message, "Secret delivered privately. It will be deleted after 30 seconds.", nil)
+	acknowledgement := "Secret delivered privately. It will remain under the configured retention policy."
+	if deleteAfter := h.service.GetEphemeralDeleteAfter(); deleteAfter > 0 {
+		acknowledgement = fmt.Sprintf("Secret delivered privately. It will be deleted after %s.", deleteAfter)
+	}
+	return h.sendReply(ctx, message, acknowledgement, nil)
 }
 
 func (h *Handler) ingestSecret(ctx context.Context, message telegram.Message, sender domain.User) error {

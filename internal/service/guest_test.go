@@ -138,3 +138,21 @@ func TestCreateGuestInlineSecret(t *testing.T) {
 		t.Fatalf("expected guest parameter prefix, got %q", session.Parameter)
 	}
 }
+
+func TestRecordRecentTargetPromotesClaimedStableID(t *testing.T) {
+	svc := &Service{recentTargetsCache: make(map[int64][]domain.RecentTarget)}
+	svc.RecordRecentTarget(101, domain.RecentTarget{
+		TargetUsername: "old_username", DisplayName: "@old_username",
+	})
+	svc.RecordRecentTarget(101, domain.RecentTarget{
+		TargetUserID: 202, TargetUsername: "old_username", DisplayName: "Bob",
+	})
+
+	targets, err := svc.GetRecentTargets(context.Background(), 101, 1)
+	if err != nil {
+		t.Fatalf("GetRecentTargets() error = %v", err)
+	}
+	if len(targets) != 1 || targets[0].TargetUserID != 202 || targets[0].TargetIdentifier() != "202" {
+		t.Fatalf("recent targets = %#v, want claimed numeric target", targets)
+	}
+}
