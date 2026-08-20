@@ -20,6 +20,7 @@ type fakeGuestUseCases struct {
 	begin       func(context.Context, string, domain.User) (service.GuestSession, error)
 	reserve     func(context.Context, string, domain.User) (service.GuestDelivery, error)
 	complete    func(context.Context, service.GuestDelivery, int64) error
+	fallback    func(context.Context, uuid.UUID) ([]byte, domain.MediaType, string, error)
 	created     service.CreateGuestRequestParams
 	markedParam string
 	completedID int64
@@ -96,7 +97,10 @@ func (f *fakeGuestUseCases) CompleteGuestOpen(ctx context.Context, delivery serv
 
 func (f *fakeGuestUseCases) FailGuestOpen(context.Context, service.GuestDelivery) error { return nil }
 
-func (f *fakeGuestUseCases) GuestMediaFallback(context.Context, uuid.UUID) ([]byte, domain.MediaType, string, error) {
+func (f *fakeGuestUseCases) GuestMediaFallback(ctx context.Context, requestID uuid.UUID) ([]byte, domain.MediaType, string, error) {
+	if f.fallback != nil {
+		return f.fallback(ctx, requestID)
+	}
 	return nil, "", "", service.ErrGuestNotFound
 }
 
@@ -170,13 +174,86 @@ func TestGuestPrivateOpenSendsAndCompletes(t *testing.T) {
 			}, nil
 		},
 	}
-	h := testHandler(&fakeUseCases{}, tg)
+	h := testHandler(&fakeUseCases{ephemeralDeleteAfter: time.Minute}, tg)
 	h.guest = guest
 	if err := h.HandleUpdate(context.Background(), privateUpdate(202, "/start guest_token")); err != nil {
 		t.Fatalf("HandleUpdate() error = %v", err)
 	}
 	if len(tg.messages) < 2 || tg.messages[0].Text != "private secret" || guest.completedID != 1 {
 		t.Fatalf("messages/completion = %#v/%d", tg.messages, guest.completedID)
+	}
+	if !strings.Contains(tg.messages[1].Text, "1m") {
+		t.Fatalf("delivery acknowledgement = %q, want configured deletion delay", tg.messages[1].Text)
+	}
+}
+
+func TestGuestPrivateMediaDeliveryFallsBackWhenFileIDIsRejected(t *testing.T) {
+	requestID := uuid.New()
+	fallbackBytes := []byte("guest media plaintext")
+	wantUploaded := string(fallbackBytes)
+	var uploaded string
+	guest := &fakeGuestUseCases{
+		begin: func(context.Context, string, domain.User) (service.GuestSession, error) {
+			return service.GuestSession{
+				Role: service.GuestRoleTarget, Parameter: "guest_token",
+				Request: repository.GuestRequest{State: repository.GuestStateReady},
+			}, nil
+		},
+		reserve: func(context.Context, string, domain.User) (service.GuestDelivery, error) {
+			return service.GuestDelivery{
+				Request: repository.GuestRequest{ID: requestID},
+				Content: service.GuestPlaintextContent{
+					Kind: domain.PayloadMedia,
+					Media: &repository.DeliveryMedia{
+						Type: domain.MediaPhoto, TelegramFileID: "dead-file-id",
+						ContentType: "image/jpeg", PlaintextSize: int64(len(fallbackBytes)),
+					},
+				},
+				LeaseUntil: time.Now().Add(time.Minute),
+			}, nil
+		},
+		fallback: func(_ context.Context, gotID uuid.UUID) ([]byte, domain.MediaType, string, error) {
+			if gotID != requestID {
+				t.Fatalf("fallback request ID = %s, want %s", gotID, requestID)
+			}
+			return fallbackBytes, domain.MediaPhoto, "image/jpeg", nil
+		},
+	}
+	tg := &fakeTelegram{
+		sendPrivateByID: func(context.Context, telegram.SendPrivateMediaByFileIDRequest) (telegram.Message, error) {
+			return telegram.Message{}, &telegram.APIError{ErrorCode: 400}
+		},
+		sendPrivateMedia: func(_ context.Context, request telegram.SendPrivateMediaRequest) (telegram.Message, error) {
+			uploaded = string(request.Data)
+			return telegram.Message{MessageID: 77, Chat: telegram.Chat{ID: 202}}, nil
+		},
+	}
+	h := testHandler(&fakeUseCases{}, tg)
+	h.guest = guest
+	if err := h.HandleUpdate(context.Background(), privateUpdate(202, "/start guest_token")); err != nil {
+		t.Fatalf("HandleUpdate() error = %v", err)
+	}
+	if len(tg.privateByID) != 1 || len(tg.private) != 1 {
+		t.Fatalf("private delivery attempts = %d/%d, want file ID plus fallback upload", len(tg.privateByID), len(tg.private))
+	}
+	if uploaded != wantUploaded {
+		t.Fatalf("fallback upload = %q, want %q", uploaded, wantUploaded)
+	}
+	if guest.completedID != 77 {
+		t.Fatalf("completed message ID = %d, want 77", guest.completedID)
+	}
+}
+
+func TestRecentTargetPrefersStableIDAfterUsernameClaim(t *testing.T) {
+	recent := domain.RecentTarget{
+		TargetUserID: 202, TargetUsername: "old_username", DisplayName: "Bob",
+	}
+	if got := recent.TargetIdentifier(); got != "202" {
+		t.Fatalf("TargetIdentifier() = %q, want stable numeric ID", got)
+	}
+	target := targetFromRecent(recent)
+	if target.Kind != command.TargetUserID || target.UserID != 202 {
+		t.Fatalf("targetFromRecent() = %#v, want numeric target 202", target)
 	}
 }
 

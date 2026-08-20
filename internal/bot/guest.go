@@ -175,6 +175,12 @@ func (h *Handler) inlineTypeSecretHint(target command.Target) telegram.InlineQue
 }
 
 func targetFromRecent(r domain.RecentTarget) command.Target {
+	if r.TargetUserID > 0 {
+		return command.Target{
+			Kind:   command.TargetUserID,
+			UserID: r.TargetUserID,
+		}
+	}
 	if r.TargetUsername != "" {
 		return command.Target{
 			Kind:     command.TargetUsername,

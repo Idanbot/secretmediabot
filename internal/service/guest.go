@@ -274,6 +274,10 @@ func (s *Service) BeginGuestSession(ctx context.Context, parameter string, actor
 	if err != nil {
 		return GuestSession{}, mapGuestRepositoryError(err)
 	}
+	s.RecordRecentTarget(request.SenderID, domain.RecentTarget{
+		TargetUserID: actor.TelegramUserID, TargetUsername: request.TargetUsername,
+		DisplayName: actor.DisplayName(), LastUsedAt: s.now(),
+	})
 	return GuestSession{Request: request, Parameter: GuestPrefix + raw, Role: GuestRoleTarget}, nil
 }
 

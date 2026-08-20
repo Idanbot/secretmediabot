@@ -53,16 +53,17 @@ type RecentTarget struct {
 	LastUsedAt     time.Time
 }
 
-// TargetIdentifier returns the @username or numeric ID string.
+// TargetIdentifier returns the stable numeric ID when the target has already
+// been claimed, otherwise the username lookup hint.
 func (r RecentTarget) TargetIdentifier() string {
+	if r.TargetUserID > 0 {
+		return strconv.FormatInt(r.TargetUserID, 10)
+	}
 	if r.TargetUsername != "" {
 		if strings.HasPrefix(r.TargetUsername, "@") {
 			return r.TargetUsername
 		}
 		return "@" + r.TargetUsername
-	}
-	if r.TargetUserID > 0 {
-		return strconv.FormatInt(r.TargetUserID, 10)
 	}
 	return ""
 }

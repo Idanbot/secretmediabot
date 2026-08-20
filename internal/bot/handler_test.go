@@ -45,6 +45,7 @@ type fakeUseCases struct {
 	ownerReview          func(context.Context, int64, uuid.UUID) (service.OwnerReview, error)
 	ownerDelete          func(context.Context, int64, uuid.UUID) error
 	ownerRetention       func(context.Context, int64, uuid.UUID, time.Duration) error
+	ephemeralDeleteAfter time.Duration
 }
 
 func (f *fakeUseCases) ObserveMembership(ctx context.Context, user domain.User, chat domain.Chat) error {
@@ -203,7 +204,7 @@ func (f *fakeUseCases) OwnerSetRetention(ctx context.Context, ownerID int64, id 
 }
 
 func (f *fakeUseCases) GetEphemeralDeleteAfter() time.Duration {
-	return 0
+	return f.ephemeralDeleteAfter
 }
 
 func (f *fakeUseCases) SetEphemeralDeleteAfter(d time.Duration) {}
