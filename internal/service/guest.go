@@ -16,7 +16,10 @@ import (
 	"github.com/idan/secretmediabot/internal/token"
 )
 
-const GuestPrefix = "guest_"
+const (
+	GuestPrefix           = "guest_"
+	guestInlinePreviewTTL = 10 * time.Minute
+)
 
 type GuestStore interface {
 	CreateGuestRequest(context.Context, repository.GuestCreateParams) (repository.GuestRequest, error)
@@ -31,6 +34,7 @@ type GuestStore interface {
 	FailGuestOpen(context.Context, repository.GuestFailOpenParams) error
 	MarkGuestEnvelope(context.Context, []byte, string, time.Time) error
 	CancelGuestRequest(context.Context, repository.CancelGuestParams) (int, error)
+	CancelGuestRequestByID(context.Context, repository.CancelGuestRequestByIDParams) error
 	FindGuestMediaPayload(context.Context, uuid.UUID) (repository.GuestMediaBlob, error)
 	FindRecentTargetsForSender(context.Context, int64, int) ([]domain.RecentTarget, error)
 }
@@ -164,6 +168,9 @@ func (s *Service) CreateGuestInlineSecret(ctx context.Context, params CreateGues
 	if params.Sender.TelegramUserID <= 0 || params.Sender.IsBot {
 		return GuestSession{}, ErrTargetRequired
 	}
+	if strings.TrimSpace(params.InlineQueryID) == "" {
+		return GuestSession{}, ErrGuestInvalidRequest
+	}
 	text := strings.TrimSpace(params.Text)
 	if text == "" {
 		return GuestSession{}, ErrUnsupportedContent
@@ -176,12 +183,16 @@ func (s *Service) CreateGuestInlineSecret(ctx context.Context, params CreateGues
 	if err != nil {
 		return GuestSession{}, err
 	}
+	expiresAt := now.Add(s.options.WhisperTTL)
+	if previewExpiresAt := now.Add(guestInlinePreviewTTL); previewExpiresAt.Before(expiresAt) {
+		expiresAt = previewExpiresAt
+	}
 	request := repository.GuestRequest{
 		ID: uuid.New(), TokenHash: guestToken.Hash[:], SenderID: params.Sender.TelegramUserID,
 		State: repository.GuestStateReady, PayloadKind: domain.PayloadText,
 		InlineQueryID: params.InlineQueryID, CreatedAt: now, UpdatedAt: now,
 		SecretReadyAt: &now,
-		ExpiresAt:     now.Add(s.options.WhisperTTL), RetentionDeleteAt: now.Add(s.options.ContentRetention),
+		ExpiresAt:     expiresAt, RetentionDeleteAt: now.Add(s.options.ContentRetention),
 	}
 	switch params.Target.Kind {
 	case command.TargetUserID:
@@ -250,6 +261,16 @@ func (s *Service) CancelGuestRequest(ctx context.Context, senderID int64) (int, 
 		return 0, mapGuestRepositoryError(err)
 	}
 	return count, nil
+}
+
+func (s *Service) CancelGuestRequestByID(ctx context.Context, requestID uuid.UUID, senderID int64) error {
+	if s.guestStore == nil {
+		return ErrGuestUnavailable
+	}
+	err := s.guestStore.CancelGuestRequestByID(ctx, repository.CancelGuestRequestByIDParams{
+		RequestID: requestID, SenderID: senderID, Now: s.now(),
+	})
+	return mapGuestRepositoryError(err)
 }
 
 func (s *Service) BeginGuestSession(ctx context.Context, parameter string, actor domain.User) (GuestSession, error) {

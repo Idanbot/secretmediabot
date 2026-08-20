@@ -72,10 +72,20 @@ func TestServiceStructsRedactCallbackTokens(t *testing.T) {
 
 type fakeGuestStore struct {
 	GuestStore
+	recentTargets []domain.RecentTarget
+	recentCalls   int
 }
 
 func (f *fakeGuestStore) CreateGuestRequest(ctx context.Context, params repository.GuestCreateParams) (repository.GuestRequest, error) {
 	return params.Request, nil
+}
+
+func (f *fakeGuestStore) FindRecentTargetsForSender(_ context.Context, _ int64, limit int) ([]domain.RecentTarget, error) {
+	f.recentCalls++
+	if limit <= 0 || limit > len(f.recentTargets) {
+		limit = len(f.recentTargets)
+	}
+	return append([]domain.RecentTarget(nil), f.recentTargets[:limit]...), nil
 }
 
 func TestCreateGuestRequestRejectsSelfTargeting(t *testing.T) {
@@ -109,6 +119,7 @@ func TestCreateGuestInlineSecret(t *testing.T) {
 	t.Parallel()
 
 	keyring := newServiceTestKeyring(t)
+	now := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
 	svc := &Service{
 		guestStore: &fakeGuestStore{},
 		cipher:     keyring,
@@ -117,13 +128,14 @@ func TestCreateGuestInlineSecret(t *testing.T) {
 			WhisperTTL:       time.Hour,
 			ContentRetention: 24 * time.Hour,
 		},
-		now: time.Now,
+		now: func() time.Time { return now },
 	}
 
 	session, err := svc.CreateGuestInlineSecret(context.Background(), CreateGuestInlineParams{
-		Sender: domain.User{TelegramUserID: 101, Username: "Alice"},
-		Target: command.Target{Kind: command.TargetUsername, Username: "bobby_user"},
-		Text:   "Confidential invoice #1049",
+		Sender:        domain.User{TelegramUserID: 101, Username: "Alice"},
+		Target:        command.Target{Kind: command.TargetUsername, Username: "bobby_user"},
+		Text:          "Confidential invoice #1049",
+		InlineQueryID: "inline-query-1",
 	})
 	if err != nil {
 		t.Fatalf("CreateGuestInlineSecret error = %v", err)
@@ -137,10 +149,29 @@ func TestCreateGuestInlineSecret(t *testing.T) {
 	if session.Parameter == "" || !strings.HasPrefix(session.Parameter, GuestPrefix) {
 		t.Fatalf("expected guest parameter prefix, got %q", session.Parameter)
 	}
+	if session.Request.InlineQueryID != "inline-query-1" {
+		t.Fatalf("inline query ID = %q, want inline-query-1", session.Request.InlineQueryID)
+	}
+	if want := now.Add(guestInlinePreviewTTL); !session.Request.ExpiresAt.Equal(want) {
+		t.Fatalf("preview expiry = %s, want %s", session.Request.ExpiresAt, want)
+	}
+	if want := now.Add(24 * time.Hour); !session.Request.RetentionDeleteAt.Equal(want) {
+		t.Fatalf("retention deletion = %s, want %s", session.Request.RetentionDeleteAt, want)
+	}
+
+	_, err = svc.CreateGuestInlineSecret(context.Background(), CreateGuestInlineParams{
+		Sender:        domain.User{TelegramUserID: 101, Username: "Alice"},
+		Target:        command.Target{Kind: command.TargetUsername, Username: "bobby_user"},
+		Text:          "missing query identity",
+		InlineQueryID: " ",
+	})
+	if !errors.Is(err, ErrGuestInvalidRequest) {
+		t.Fatalf("missing inline query ID error = %v, want ErrGuestInvalidRequest", err)
+	}
 }
 
 func TestRecordRecentTargetPromotesClaimedStableID(t *testing.T) {
-	svc := &Service{recentTargetsCache: make(map[int64][]domain.RecentTarget)}
+	svc := &Service{recentTargetsCache: make(map[int64]recentTargetsCacheEntry)}
 	svc.RecordRecentTarget(101, domain.RecentTarget{
 		TargetUsername: "old_username", DisplayName: "@old_username",
 	})
@@ -154,5 +185,74 @@ func TestRecordRecentTargetPromotesClaimedStableID(t *testing.T) {
 	}
 	if len(targets) != 1 || targets[0].TargetUserID != 202 || targets[0].TargetIdentifier() != "202" {
 		t.Fatalf("recent targets = %#v, want claimed numeric target", targets)
+	}
+}
+
+func TestRecentTargetsCacheReturnsCopiesAndExpires(t *testing.T) {
+	now := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	store := &fakeGuestStore{recentTargets: []domain.RecentTarget{{
+		TargetUsername: "first_target", DisplayName: "@first_target", LastUsedAt: now,
+	}}}
+	svc := &Service{
+		guestStore:         store,
+		now:                func() time.Time { return now },
+		recentTargetsCache: make(map[int64]recentTargetsCacheEntry),
+	}
+
+	got, err := svc.GetRecentTargets(context.Background(), 101, 3)
+	if err != nil {
+		t.Fatalf("first GetRecentTargets() error = %v", err)
+	}
+	if store.recentCalls != 1 || len(got) != 1 {
+		t.Fatalf("first cache lookup calls/results = %d/%#v", store.recentCalls, got)
+	}
+	got[0].DisplayName = "mutated caller copy"
+
+	cached, err := svc.GetRecentTargets(context.Background(), 101, 3)
+	if err != nil {
+		t.Fatalf("cached GetRecentTargets() error = %v", err)
+	}
+	if store.recentCalls != 1 || cached[0].DisplayName != "@first_target" {
+		t.Fatalf("cached targets = %#v, calls = %d; want an isolated fresh cache copy", cached, store.recentCalls)
+	}
+
+	now = now.Add(recentTargetsCacheTTL + time.Second)
+	store.recentTargets = []domain.RecentTarget{{
+		TargetUsername: "second_target", DisplayName: "@second_target", LastUsedAt: now,
+	}}
+	fresh, err := svc.GetRecentTargets(context.Background(), 101, 3)
+	if err != nil {
+		t.Fatalf("expired GetRecentTargets() error = %v", err)
+	}
+	if store.recentCalls != 2 || len(fresh) != 1 || fresh[0].TargetUsername != "second_target" {
+		t.Fatalf("expired cache lookup calls/results = %d/%#v", store.recentCalls, fresh)
+	}
+}
+
+func TestRecentTargetsCacheBoundsSendersAndResults(t *testing.T) {
+	svc := &Service{recentTargetsCache: make(map[int64]recentTargetsCacheEntry)}
+	for senderID := int64(1); senderID <= recentTargetsCacheMaxSenders+1; senderID++ {
+		svc.RecordRecentTarget(senderID, domain.RecentTarget{
+			TargetUserID: senderID + 1000, DisplayName: "bounded",
+		})
+	}
+
+	svc.mu.RLock()
+	cacheSize := len(svc.recentTargetsCache)
+	svc.mu.RUnlock()
+	if cacheSize > recentTargetsCacheMaxSenders {
+		t.Fatalf("recent target cache size = %d, want <= %d", cacheSize, recentTargetsCacheMaxSenders)
+	}
+
+	for index := 0; index < recentTargetsPerSender+2; index++ {
+		svc.RecordRecentTarget(9000, domain.RecentTarget{
+			TargetUsername: strings.Repeat("target", index+1), DisplayName: "bounded",
+		})
+	}
+	svc.mu.RLock()
+	targetCount := len(svc.recentTargetsCache[9000].targets)
+	svc.mu.RUnlock()
+	if targetCount > recentTargetsPerSender {
+		t.Fatalf("per-sender recent target count = %d, want <= %d", targetCount, recentTargetsPerSender)
 	}
 }

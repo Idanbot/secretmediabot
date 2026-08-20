@@ -81,6 +81,8 @@ func TestPostgresRepositoryIntegration(t *testing.T) {
 		{name: "one-time open reservation allows exactly one concurrent recipient", run: testReserveOneTimeOpenConcurrency},
 		{name: "completed delivery enqueues a durable ephemeral deletion", run: testCompleteOpenDurablyEnqueuesDeletion},
 		{name: "guest request claims target, stores content, and enqueues private deletion", run: testGuestRequestLifecycle},
+		{name: "inline preview cancellation is sender-scoped and idempotently guarded", run: testCancelGuestRequestByID},
+		{name: "recent targets coalesce stable IDs across username hints", run: testRecentTargetsCoalesceStableIDs},
 		{name: "retention cleanup removes whisper metadata and encrypted children", run: testRetentionCleanupCascades},
 	}
 
@@ -208,6 +210,100 @@ func testGuestRequestLifecycle(t *testing.T, test postgresTest) {
 	}
 	if err := test.store.MarkGuestDeleted(ctx, repository.FinishGuestDeleteParams{JobID: job.ID, ExpectedLeaseUntil: job.LeaseUntil, Now: now.Add(time.Minute)}); err != nil {
 		t.Fatalf("mark guest deleted: %v", err)
+	}
+}
+
+func testRecentTargetsCoalesceStableIDs(t *testing.T, test postgresTest) {
+	t.Helper()
+	ctx := context.Background()
+	sender := domain.User{TelegramUserID: 551, Username: "recent_sender"}
+	targetID := int64(552)
+	now := test.now
+
+	newRequest := func(queryID, token, username string) repository.GuestRequest {
+		return repository.GuestRequest{
+			ID: uuid.New(), TokenHash: digest(token), SenderID: sender.TelegramUserID,
+			TargetUserID: &targetID, TargetUsername: username, GuestQueryID: queryID,
+			State: repository.GuestStateAwaitingSecret, CreatedAt: now, UpdatedAt: now,
+			ExpiresAt: now.Add(time.Hour), RetentionDeleteAt: now.Add(24 * time.Hour),
+		}
+	}
+	first := newRequest("recent-query-old", "recent-token-old", "old_hint")
+	if _, err := test.store.CreateGuestRequest(ctx, repository.GuestCreateParams{
+		Request: first, Sender: sender, Now: now,
+	}); err != nil {
+		t.Fatalf("create first recent-target request: %v", err)
+	}
+	if err := test.db.GORM().Table("guest_secret_requests").Where("id = ?", first.ID).
+		Update("state", repository.GuestStateCancelled).Error; err != nil {
+		t.Fatalf("retire first recent-target request: %v", err)
+	}
+
+	second := newRequest("recent-query-new", "recent-token-new", "new_hint")
+	second.CreatedAt = now.Add(time.Second)
+	second.UpdatedAt = second.CreatedAt
+	second.ExpiresAt = second.CreatedAt.Add(time.Hour)
+	second.RetentionDeleteAt = second.CreatedAt.Add(24 * time.Hour)
+	if _, err := test.store.CreateGuestRequest(ctx, repository.GuestCreateParams{
+		Request: second, Sender: sender, Now: now,
+	}); err != nil {
+		t.Fatalf("create second recent-target request: %v", err)
+	}
+
+	results, err := test.store.FindRecentTargetsForSender(ctx, sender.TelegramUserID, 10)
+	if err != nil {
+		t.Fatalf("find recent targets: %v", err)
+	}
+	if len(results) != 1 || results[0].TargetUserID != targetID {
+		t.Fatalf("recent targets = %#v, want one stable target ID %d", results, targetID)
+	}
+}
+
+func testCancelGuestRequestByID(t *testing.T, test postgresTest) {
+	t.Helper()
+	ctx := context.Background()
+	sender := domain.User{TelegramUserID: 561, Username: "cancel_sender"}
+	targetID := int64(562)
+	now := test.now
+	readyAt := now
+	request := repository.GuestRequest{
+		ID: uuid.New(), TokenHash: digest("cancel-inline-token"), SenderID: sender.TelegramUserID,
+		TargetUserID: &targetID, InlineQueryID: "cancel-inline-query", State: repository.GuestStateReady,
+		PayloadKind: domain.PayloadText, CreatedAt: now, UpdatedAt: now,
+		SecretReadyAt: &readyAt, ExpiresAt: now.Add(time.Hour), RetentionDeleteAt: now.Add(24 * time.Hour),
+	}
+	payload := repository.GuestPayload{
+		ID: uuid.New(), RequestID: request.ID, Purpose: "text", EncryptionAlgorithm: "AES-256-GCM",
+		EncryptionKeyID: "integration", Nonce: bytes.Repeat([]byte{0x02}, secretcrypto.NonceSize),
+		Ciphertext: []byte("ciphertext"), CiphertextSHA256: digest("ciphertext"), PlaintextSize: 11,
+		RetainUntil: now.Add(24 * time.Hour),
+	}
+	if _, err := test.store.CreateGuestRequest(ctx, repository.GuestCreateParams{
+		Request: request, Sender: sender, TextPayload: &payload, Now: now,
+	}); err != nil {
+		t.Fatalf("create inline preview request: %v", err)
+	}
+	if err := test.store.CancelGuestRequestByID(ctx, repository.CancelGuestRequestByIDParams{
+		RequestID: request.ID, SenderID: sender.TelegramUserID + 1, Now: now,
+	}); !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("wrong-sender cancellation error = %v, want ErrNotFound", err)
+	}
+	if err := test.store.CancelGuestRequestByID(ctx, repository.CancelGuestRequestByIDParams{
+		RequestID: request.ID, SenderID: sender.TelegramUserID, Now: now,
+	}); err != nil {
+		t.Fatalf("cancel inline preview: %v", err)
+	}
+	if err := test.store.CancelGuestRequestByID(ctx, repository.CancelGuestRequestByIDParams{
+		RequestID: request.ID, SenderID: sender.TelegramUserID, Now: now,
+	}); !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("repeat cancellation error = %v, want ErrNotFound", err)
+	}
+	reloaded, err := test.store.FindGuestRequestByTokenHash(ctx, request.TokenHash)
+	if err != nil {
+		t.Fatalf("reload cancelled inline preview: %v", err)
+	}
+	if reloaded.State != repository.GuestStateCancelled {
+		t.Fatalf("cancelled preview state = %q, want %q", reloaded.State, repository.GuestStateCancelled)
 	}
 }
 

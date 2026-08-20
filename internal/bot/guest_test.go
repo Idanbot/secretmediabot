@@ -15,15 +15,19 @@ import (
 )
 
 type fakeGuestUseCases struct {
-	create      func(context.Context, service.CreateGuestRequestParams) (service.GuestSession, error)
-	mark        func(context.Context, string, string) error
-	begin       func(context.Context, string, domain.User) (service.GuestSession, error)
-	reserve     func(context.Context, string, domain.User) (service.GuestDelivery, error)
-	complete    func(context.Context, service.GuestDelivery, int64) error
-	fallback    func(context.Context, uuid.UUID) ([]byte, domain.MediaType, string, error)
-	created     service.CreateGuestRequestParams
-	markedParam string
-	completedID int64
+	create       func(context.Context, service.CreateGuestRequestParams) (service.GuestSession, error)
+	createInline func(context.Context, service.CreateGuestInlineParams) (service.GuestSession, error)
+	cancelByID   func(context.Context, uuid.UUID, int64) error
+	mark         func(context.Context, string, string) error
+	begin        func(context.Context, string, domain.User) (service.GuestSession, error)
+	reserve      func(context.Context, string, domain.User) (service.GuestDelivery, error)
+	complete     func(context.Context, service.GuestDelivery, int64) error
+	fallback     func(context.Context, uuid.UUID) ([]byte, domain.MediaType, string, error)
+	recent       []domain.RecentTarget
+	created      service.CreateGuestRequestParams
+	inlineParams []service.CreateGuestInlineParams
+	markedParam  string
+	completedID  int64
 }
 
 func (f *fakeGuestUseCases) CreateGuestRequest(ctx context.Context, params service.CreateGuestRequestParams) (service.GuestSession, error) {
@@ -35,6 +39,10 @@ func (f *fakeGuestUseCases) CreateGuestRequest(ctx context.Context, params servi
 }
 
 func (f *fakeGuestUseCases) CreateGuestInlineSecret(ctx context.Context, params service.CreateGuestInlineParams) (service.GuestSession, error) {
+	f.inlineParams = append(f.inlineParams, params)
+	if f.createInline != nil {
+		return f.createInline(ctx, params)
+	}
 	return service.GuestSession{
 		Request: repository.GuestRequest{
 			ID:          uuid.New(),
@@ -55,6 +63,13 @@ func (f *fakeGuestUseCases) MarkGuestEnvelope(ctx context.Context, parameter, in
 
 func (f *fakeGuestUseCases) CancelGuestRequest(context.Context, int64) (int, error) {
 	return 0, service.ErrGuestNotFound
+}
+
+func (f *fakeGuestUseCases) CancelGuestRequestByID(ctx context.Context, requestID uuid.UUID, senderID int64) error {
+	if f.cancelByID != nil {
+		return f.cancelByID(ctx, requestID, senderID)
+	}
+	return nil
 }
 
 func (f *fakeGuestUseCases) BeginGuestSession(ctx context.Context, parameter string, user domain.User) (service.GuestSession, error) {
@@ -104,8 +119,11 @@ func (f *fakeGuestUseCases) GuestMediaFallback(ctx context.Context, requestID uu
 	return nil, "", "", service.ErrGuestNotFound
 }
 
-func (f *fakeGuestUseCases) GetRecentTargets(context.Context, int64, int) ([]domain.RecentTarget, error) {
-	return nil, nil
+func (f *fakeGuestUseCases) GetRecentTargets(_ context.Context, _ int64, limit int) ([]domain.RecentTarget, error) {
+	if limit > 0 && len(f.recent) > limit {
+		return append([]domain.RecentTarget(nil), f.recent[:limit]...), nil
+	}
+	return append([]domain.RecentTarget(nil), f.recent...), nil
 }
 
 func TestParseGuestTargetSupportsIDsAndUsernames(t *testing.T) {
@@ -321,6 +339,93 @@ func TestInlineQueryRecentTargets(t *testing.T) {
 	}
 	if len(tg.inlineAnswers) != 1 {
 		t.Fatalf("expected 1 inline answer, got %d", len(tg.inlineAnswers))
+	}
+}
+
+func TestInlineQueryRecentTargetsUsesUniqueRequestAndResultIdentities(t *testing.T) {
+	tg := &fakeTelegram{}
+	guest := &fakeGuestUseCases{recent: []domain.RecentTarget{
+		{TargetUserID: 202, DisplayName: "Bob"},
+		{TargetUsername: "other_target", DisplayName: "@other_target"},
+	}}
+	h := testHandler(&fakeUseCases{}, tg)
+	h.guest = guest
+
+	err := h.HandleUpdate(context.Background(), telegram.Update{
+		InlineQuery: &telegram.InlineQuery{
+			ID:    "query_recent_unique",
+			From:  telegram.User{ID: 101, Username: "sender_user"},
+			Query: "secret!",
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleUpdate(recent inline query) error = %v", err)
+	}
+	if len(tg.inlineAnswers) != 1 || len(tg.inlineAnswers[0].Results) != 2 {
+		t.Fatalf("recent inline answer = %#v, want two results", tg.inlineAnswers)
+	}
+	if len(guest.inlineParams) != 2 || guest.inlineParams[0].InlineQueryID == guest.inlineParams[1].InlineQueryID {
+		t.Fatalf("recent inline query IDs = %#v, want unique IDs", guest.inlineParams)
+	}
+	if tg.inlineAnswers[0].Results[0].ID == tg.inlineAnswers[0].Results[1].ID {
+		t.Fatalf("recent result IDs collided: %#v", tg.inlineAnswers[0].Results)
+	}
+}
+
+func TestInlineQuerySeparatesInstantTextAndMediaResultIDs(t *testing.T) {
+	tg := &fakeTelegram{}
+	guest := &fakeGuestUseCases{}
+	h := testHandler(&fakeUseCases{}, tg)
+	h.guest = guest
+
+	err := h.HandleUpdate(context.Background(), telegram.Update{
+		InlineQuery: &telegram.InlineQuery{
+			ID:    "query_media_literal",
+			From:  telegram.User{ID: 101, Username: "sender_user"},
+			Query: "@target_user media",
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleUpdate(media literal inline query) error = %v", err)
+	}
+	if len(tg.inlineAnswers) != 1 || len(tg.inlineAnswers[0].Results) != 2 {
+		t.Fatalf("inline answer = %#v, want instant and media results", tg.inlineAnswers)
+	}
+	if tg.inlineAnswers[0].Results[0].ID == tg.inlineAnswers[0].Results[1].ID {
+		t.Fatalf("instant/media result IDs collided: %#v", tg.inlineAnswers[0].Results)
+	}
+}
+
+func TestInlineQueryPermanentAnswerFailureCancelsReadyPreview(t *testing.T) {
+	tg := &fakeTelegram{
+		answerInline: func(context.Context, telegram.AnswerInlineQueryRequest) error {
+			return &telegram.APIError{ErrorCode: 400, Description: "query is too old"}
+		},
+	}
+	var cancelledID uuid.UUID
+	var cancelledSender int64
+	guest := &fakeGuestUseCases{
+		cancelByID: func(_ context.Context, requestID uuid.UUID, senderID int64) error {
+			cancelledID = requestID
+			cancelledSender = senderID
+			return nil
+		},
+	}
+	h := testHandler(&fakeUseCases{}, tg)
+	h.guest = guest
+
+	err := h.HandleUpdate(context.Background(), telegram.Update{
+		InlineQuery: &telegram.InlineQuery{
+			ID:    "query_cancel_preview",
+			From:  telegram.User{ID: 101, Username: "sender_user"},
+			Query: "@target_user private preview",
+		},
+	})
+	if err == nil || !telegram.IsPermanent(err) {
+		t.Fatalf("HandleUpdate() error = %v, want permanent Telegram error", err)
+	}
+	if cancelledID == uuid.Nil || cancelledSender != 101 {
+		t.Fatalf("cancelled preview = %s/%d, want generated request and sender 101", cancelledID, cancelledSender)
 	}
 }
 

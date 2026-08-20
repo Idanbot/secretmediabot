@@ -288,6 +288,85 @@ func TestGuestInlineAndPrivateControlMethods(t *testing.T) {
 	}
 }
 
+func TestAnswerInlineQueryValidatesResultBatch(t *testing.T) {
+	t.Parallel()
+
+	article := func(id string) InlineQueryResultArticle {
+		return InlineQueryResultArticle{
+			Type: "article", ID: id, Title: "Secret",
+			InputMessageContent: InputTextMessageContent{MessageText: "Locked secret"},
+		}
+	}
+	tests := []struct {
+		name string
+		req  AnswerInlineQueryRequest
+	}{
+		{
+			name: "empty query ID",
+			req:  AnswerInlineQueryRequest{Results: []InlineQueryResultArticle{article("one")}},
+		},
+		{
+			name: "empty results",
+			req:  AnswerInlineQueryRequest{InlineQueryID: "query"},
+		},
+		{
+			name: "duplicate IDs",
+			req: AnswerInlineQueryRequest{
+				InlineQueryID: "query", Results: []InlineQueryResultArticle{article("same"), article("same")},
+			},
+		},
+		{
+			name: "invalid article",
+			req: AnswerInlineQueryRequest{
+				InlineQueryID: "query", Results: []InlineQueryResultArticle{{Type: "article", ID: "one"}},
+			},
+		},
+	}
+	tooMany := make([]InlineQueryResultArticle, maxInlineQueryResults+1)
+	for index := range tooMany {
+		tooMany[index] = article(fmt.Sprintf("result-%d", index))
+	}
+	tests = append(tests, struct {
+		name string
+		req  AnswerInlineQueryRequest
+	}{name: "more than Telegram allows", req: AnswerInlineQueryRequest{InlineQueryID: "query", Results: tooMany}})
+
+	client := &Client{}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := client.AnswerInlineQuery(context.Background(), tt.req); !errors.Is(err, ErrInvalidArgument) {
+				t.Fatalf("AnswerInlineQuery() error = %v, want ErrInvalidArgument", err)
+			}
+		})
+	}
+
+	if _, err := client.AnswerGuestQuery(context.Background(), AnswerGuestQueryRequest{
+		GuestQueryID: "guest-query", Result: InlineQueryResultArticle{Type: "article", ID: "invalid"},
+	}); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("invalid AnswerGuestQuery() error = %v, want ErrInvalidArgument", err)
+	}
+}
+
+func TestSendMessageRejectsSuccessfulResponseWithoutMessageIdentity(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, map[string]any{
+			"ok": true,
+			"result": map[string]any{
+				"chat": map[string]any{"id": 123, "type": "private"},
+			},
+		})
+	}))
+	defer server.Close()
+	client := mustClient(t, server.URL, DefaultMaxDownloadSize)
+
+	_, err := client.SendMessage(context.Background(), SendMessageRequest{ChatID: 123, Text: "secret"})
+	if !errors.Is(err, ErrInvalidResponse) {
+		t.Fatalf("SendMessage() error = %v, want ErrInvalidResponse", err)
+	}
+}
+
 func TestGetChatMemberAndGetFile(t *testing.T) {
 	t.Parallel()
 

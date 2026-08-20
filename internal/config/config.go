@@ -464,7 +464,10 @@ func (c Config) IsOwner(userID int64) bool {
 
 // ProductionLike reports whether the deployment demands production posture.
 func (c Config) ProductionLike() bool {
-	return c.AppEnv == "production"
+	// Development and test are the only environments allowed to opt into
+	// relaxed transport and chat-scope defaults. A typo or a new deployment
+	// label must fail closed rather than silently weakening production posture.
+	return c.AppEnv != "development" && c.AppEnv != "test"
 }
 
 // warnings lists non-fatal conditions an operator should see at startup.
@@ -474,7 +477,7 @@ func (c Config) warnings() []string {
 	case "development", "test", "production":
 	default:
 		warnings = append(warnings,
-			"APP_ENV "+c.AppEnv+" is not one of development, test, or production; production posture is not applied")
+			"APP_ENV "+c.AppEnv+" is not one of development, test, or production; strict production posture is applied")
 	}
 	if !c.ProductionLike() && len(c.Whisper.AllowedChatIDs) == 0 && c.Whisper.AllowAllChats {
 		warnings = append(warnings,

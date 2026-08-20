@@ -19,7 +19,16 @@ const (
 	MaxSecretTextRunes = 4096
 	MaxCaptionRunes    = 1024
 	ComposePrefix      = "compose_"
+
+	recentTargetsCacheTTL        = 10 * time.Minute
+	recentTargetsCacheMaxSenders = 1024
+	recentTargetsPerSender       = 5
 )
+
+type recentTargetsCacheEntry struct {
+	targets  []domain.RecentTarget
+	storedAt time.Time
+}
 
 type Store interface {
 	ObserveMembership(context.Context, repository.ObserveMembershipParams) error
@@ -82,7 +91,7 @@ type Service struct {
 	allowed            map[int64]struct{}
 	owners             map[int64]struct{}
 	mu                 sync.RWMutex
-	recentTargetsCache map[int64][]domain.RecentTarget
+	recentTargetsCache map[int64]recentTargetsCacheEntry
 }
 
 func New(store Store, cipher *secretcrypto.Keyring, options Options) (*Service, error) {
@@ -117,7 +126,7 @@ func New(store Store, cipher *secretcrypto.Keyring, options Options) (*Service, 
 	return &Service{
 		store: store, guestStore: guestStore, cipher: cipher, options: options,
 		now: func() time.Time { return time.Now().UTC() }, allowed: allowed, owners: owners,
-		recentTargetsCache: make(map[int64][]domain.RecentTarget),
+		recentTargetsCache: make(map[int64]recentTargetsCacheEntry),
 	}, nil
 }
 
@@ -139,33 +148,29 @@ func (s *Service) SetEphemeralDeleteAfter(d time.Duration) {
 func (s *Service) GetRecentTargets(ctx context.Context, senderID int64, limit int) ([]domain.RecentTarget, error) {
 	if limit <= 0 {
 		limit = 3
+	} else if limit > recentTargetsPerSender {
+		limit = recentTargetsPerSender
+	}
+	now := time.Now().UTC()
+	if s.now != nil {
+		now = s.now()
 	}
 	s.mu.RLock()
-	var (
-		cached []domain.RecentTarget
-		ok     bool
-	)
-	if s.recentTargetsCache != nil {
-		cached, ok = s.recentTargetsCache[senderID]
-	}
-	s.mu.RUnlock()
-	if ok && len(cached) > 0 {
-		if len(cached) > limit {
-			return cached[:limit], nil
-		}
+	entry, ok := s.recentTargetsCache[senderID]
+	if ok && now.Sub(entry.storedAt) <= recentTargetsCacheTTL {
+		cached := trimRecentTargets(cloneRecentTargets(entry.targets), limit)
+		s.mu.RUnlock()
 		return cached, nil
 	}
+	s.mu.RUnlock()
 
 	if s.guestStore != nil {
 		targets, err := s.guestStore.FindRecentTargetsForSender(ctx, senderID, limit)
 		if err == nil && len(targets) > 0 {
 			s.mu.Lock()
-			if s.recentTargetsCache == nil {
-				s.recentTargetsCache = make(map[int64][]domain.RecentTarget)
-			}
-			s.recentTargetsCache[senderID] = targets
+			s.storeRecentTargetsLocked(senderID, targets, now)
 			s.mu.Unlock()
-			return targets, nil
+			return trimRecentTargets(cloneRecentTargets(targets), limit), nil
 		}
 	}
 	return nil, nil
@@ -178,10 +183,10 @@ func (s *Service) RecordRecentTarget(senderID int64, target domain.RecentTarget)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.recentTargetsCache == nil {
-		s.recentTargetsCache = make(map[int64][]domain.RecentTarget)
+		s.recentTargetsCache = make(map[int64]recentTargetsCacheEntry)
 	}
-	current := s.recentTargetsCache[senderID]
-	var updated []domain.RecentTarget
+	current := s.recentTargetsCache[senderID].targets
+	updated := make([]domain.RecentTarget, 0, recentTargetsPerSender)
 	updated = append(updated, target)
 	for _, item := range current {
 		if (target.TargetUserID > 0 && item.TargetUserID == target.TargetUserID) ||
@@ -189,11 +194,55 @@ func (s *Service) RecordRecentTarget(senderID int64, target domain.RecentTarget)
 			continue
 		}
 		updated = append(updated, item)
-		if len(updated) >= 5 {
+		if len(updated) >= recentTargetsPerSender {
 			break
 		}
 	}
-	s.recentTargetsCache[senderID] = updated
+	storedAt := target.LastUsedAt
+	if storedAt.IsZero() {
+		storedAt = time.Now().UTC()
+		if s.now != nil {
+			storedAt = s.now()
+		}
+	}
+	s.storeRecentTargetsLocked(senderID, updated, storedAt)
+}
+
+func (s *Service) storeRecentTargetsLocked(senderID int64, targets []domain.RecentTarget, storedAt time.Time) {
+	if s.recentTargetsCache == nil {
+		s.recentTargetsCache = make(map[int64]recentTargetsCacheEntry)
+	}
+	if _, exists := s.recentTargetsCache[senderID]; !exists && len(s.recentTargetsCache) >= recentTargetsCacheMaxSenders {
+		var (
+			oldestID int64
+			oldestAt time.Time
+		)
+		for candidateID, entry := range s.recentTargetsCache {
+			if oldestAt.IsZero() || entry.storedAt.Before(oldestAt) {
+				oldestID = candidateID
+				oldestAt = entry.storedAt
+			}
+		}
+		delete(s.recentTargetsCache, oldestID)
+	}
+	if len(targets) > recentTargetsPerSender {
+		targets = targets[:recentTargetsPerSender]
+	}
+	s.recentTargetsCache[senderID] = recentTargetsCacheEntry{
+		targets:  cloneRecentTargets(targets),
+		storedAt: storedAt,
+	}
+}
+
+func cloneRecentTargets(targets []domain.RecentTarget) []domain.RecentTarget {
+	return append([]domain.RecentTarget(nil), targets...)
+}
+
+func trimRecentTargets(targets []domain.RecentTarget, limit int) []domain.RecentTarget {
+	if len(targets) > limit {
+		return targets[:limit]
+	}
+	return targets
 }
 
 func (s *Service) IsOwner(telegramUserID int64) bool {

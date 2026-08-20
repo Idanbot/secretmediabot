@@ -304,6 +304,25 @@ func TestProductionRequiresExplicitChatScope(t *testing.T) {
 	}
 }
 
+func TestUnknownEnvironmentFailsClosedToProductionPosture(t *testing.T) {
+	t.Parallel()
+
+	env := validEnvironment()
+	env["APP_ENV"] = "produciton"
+	env["ALLOW_ALL_CHATS"] = "true"
+	env["DATABASE_URL"] = "postgres://user:pass@db.example.com:5432/bot?sslmode=require"
+	cfg, err := LoadFromLookup(mapLookup(env))
+	if err != nil {
+		t.Fatalf("unknown environment should load with explicit secure settings: %v", err)
+	}
+	if !cfg.ProductionLike() {
+		t.Fatal("unknown environment relaxed production posture")
+	}
+	if !strings.Contains(strings.Join(cfg.Warnings, "\n"), "strict production posture is applied") {
+		t.Fatalf("warnings = %v, want strict posture warning", cfg.Warnings)
+	}
+}
+
 func TestProductionRejectsPlaintextDatabaseTransport(t *testing.T) {
 	t.Parallel()
 
