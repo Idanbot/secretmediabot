@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/idan/secretmediabot/internal/command"
 	"github.com/idan/secretmediabot/internal/domain"
@@ -18,6 +19,11 @@ import (
 // result ID is derived from the query, so identical queries reuse the same
 // envelope instead of hammering the database on every keystroke.
 const inlineResultCacheSeconds = 300
+
+const (
+	inlineResultVariantInstant = "instant:"
+	inlineResultVariantMedia   = "media:"
+)
 
 func (h *Handler) handleGuestMessage(ctx context.Context, message telegram.Message) error {
 	if h.guest == nil || message.GuestQueryID == "" {
@@ -54,7 +60,7 @@ func (h *Handler) handleGuestMessage(ctx context.Context, message telegram.Messa
 		}
 		return h.answerGuestNotice(ctx, message.GuestQueryID, "I could not create that locked secret. Try again shortly.")
 	}
-	result := h.guestArticle(session, target, inlineResultID(h.botUsername, sender.TelegramUserID, target, ""))
+	result := h.guestArticle(session, target, inlineResultID(h.botUsername, sender.TelegramUserID, target, inlineResultVariantMedia))
 	requestCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
 	sent, err := h.telegram.AnswerGuestQuery(requestCtx, telegram.AnswerGuestQueryRequest{
 		GuestQueryID: message.GuestQueryID, Result: result,
@@ -88,29 +94,28 @@ func (h *Handler) handleInlineQuery(ctx context.Context, query telegram.InlineQu
 		recents, _ := h.guest.GetRecentTargets(ctx, query.From.ID, 3)
 		if len(recents) > 0 {
 			var articles []telegram.InlineQueryResultArticle
+			var previews []service.GuestSession
 			for _, recent := range recents {
 				recentTarget := targetFromRecent(recent)
 				session, err := h.guest.CreateGuestInlineSecret(ctx, service.CreateGuestInlineParams{
-					Sender: domainUser(query.From), Target: recentTarget, Text: raw, InlineQueryID: query.ID,
+					Sender: domainUser(query.From), Target: recentTarget, Text: raw,
+					InlineQueryID: recentInlineQueryID(query.ID, recentTarget),
 				})
 				if err == nil {
-					articles = append(articles, h.guestInlineArticleWithLabel(session, recentTarget, recent.Label(), raw, inlineResultID(h.botUsername, query.From.ID, recentTarget, raw)))
+					previews = append(previews, session)
+					articles = append(articles, h.guestInlineArticleWithLabel(session, recentTarget, recent.Label(), raw,
+						inlineResultID(h.botUsername, query.From.ID, recentTarget, inlineResultVariantInstant+raw)))
 				}
 			}
 			if len(articles) > 0 {
-				requestCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
-				err = h.telegram.AnswerInlineQuery(requestCtx, telegram.AnswerInlineQueryRequest{
-					InlineQueryID: query.ID, Results: articles,
-					CacheTime: inlineResultCacheSeconds, IsPersonal: true,
-				})
-				cancel()
-				return err
+				return h.answerInlineResults(ctx, query.ID, articles, previews, query.From.ID)
 			}
 		}
 		return h.answerInlineHelp(ctx, query.From.ID, query.ID)
 	}
 
 	var articles []telegram.InlineQueryResultArticle
+	var instantPreview service.GuestSession
 
 	if secretText != "" {
 		// Flow 1: Instant Text Secret
@@ -121,8 +126,10 @@ func (h *Handler) handleInlineQuery(ctx context.Context, query telegram.InlineQu
 			title, desc := inlineNoticeFromError(err)
 			return h.answerInlineNotice(ctx, query.ID, title, desc)
 		}
+		instantPreview = session
 		articles = []telegram.InlineQueryResultArticle{
-			h.guestInlineArticle(session, target, secretText, inlineResultID(h.botUsername, query.From.ID, target, secretText)),
+			h.guestInlineArticle(session, target, secretText,
+				inlineResultID(h.botUsername, query.From.ID, target, inlineResultVariantInstant+secretText)),
 		}
 
 		// Flow 2: Media option as secondary
@@ -130,7 +137,8 @@ func (h *Handler) handleInlineQuery(ctx context.Context, query telegram.InlineQu
 			Sender: domainUser(query.From), Target: target, InlineQueryID: query.ID + "-media",
 		})
 		if err == nil {
-			articles = append(articles, h.guestArticle(mediaSession, target, inlineResultID(h.botUsername, query.From.ID, target, "media")))
+			articles = append(articles, h.guestArticle(mediaSession, target,
+				inlineResultID(h.botUsername, query.From.ID, target, inlineResultVariantMedia)))
 		}
 	} else {
 		// Flow 2: Media / DM Secret (target specified without secret text)
@@ -142,17 +150,44 @@ func (h *Handler) handleInlineQuery(ctx context.Context, query telegram.InlineQu
 			return h.answerInlineNotice(ctx, query.ID, title, desc)
 		}
 		articles = []telegram.InlineQueryResultArticle{
-			h.guestArticle(session, target, inlineResultID(h.botUsername, query.From.ID, target, "")),
+			h.guestArticle(session, target, inlineResultID(h.botUsername, query.From.ID, target, inlineResultVariantMedia)),
 			h.inlineTypeSecretHint(target),
 		}
 	}
 
+	var previews []service.GuestSession
+	if secretText != "" {
+		// Only ready text previews are safe to cancel after a permanent answer
+		// failure. The secondary media request may be reused by another query.
+		previews = append(previews, instantPreview)
+	}
+	return h.answerInlineResults(ctx, query.ID, articles, previews, query.From.ID)
+}
+
+func (h *Handler) answerInlineResults(
+	ctx context.Context,
+	queryID string,
+	results []telegram.InlineQueryResultArticle,
+	previews []service.GuestSession,
+	senderID int64,
+) error {
 	requestCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
-	err = h.telegram.AnswerInlineQuery(requestCtx, telegram.AnswerInlineQueryRequest{
-		InlineQueryID: query.ID, Results: articles,
+	err := h.telegram.AnswerInlineQuery(requestCtx, telegram.AnswerInlineQueryRequest{
+		InlineQueryID: queryID, Results: results,
 		CacheTime: inlineResultCacheSeconds, IsPersonal: true,
 	})
 	cancel()
+	if err == nil || !telegram.IsPermanent(err) || len(previews) == 0 {
+		return err
+	}
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cleanupCancel()
+	for _, preview := range previews {
+		if cancelErr := h.guest.CancelGuestRequestByID(cleanupCtx, preview.Request.ID, senderID); cancelErr != nil &&
+			!errors.Is(cancelErr, service.ErrGuestNotFound) {
+			h.logger.WarnContext(ctx, "inline preview cancellation failed")
+		}
+	}
 	return err
 }
 
@@ -227,14 +262,27 @@ func cleanSecretText(s string) string {
 	return s
 }
 
-// inlineResultID derives a stable inline result ID from query parameters.
-func inlineResultID(botUsername string, senderID int64, target command.Target, text string) string {
+// inlineResultID derives a stable inline result ID from the target and result
+// variant. Variant prefixes keep a secret whose text happens to be "media"
+// distinct from the secondary media result.
+func inlineResultID(botUsername string, senderID int64, target command.Target, variant string) string {
 	targetText := target.Username
 	if target.Kind == command.TargetUserID {
 		targetText = fmt.Sprintf("id:%d", target.UserID)
 	}
-	digest := sha256.Sum256([]byte(botUsername + "|" + fmt.Sprintf("%d", senderID) + "|" + targetText + "|" + text))
+	digest := sha256.Sum256([]byte(botUsername + "|" + fmt.Sprintf("%d", senderID) + "|" + targetText + "|" + variant))
 	return hex.EncodeToString(digest[:16])
+}
+
+func recentInlineQueryID(queryID string, target command.Target) string {
+	return queryID + "-recent-" + inlineTargetKey(target)
+}
+
+func inlineTargetKey(target command.Target) string {
+	if target.Kind == command.TargetUserID {
+		return fmt.Sprintf("user-id-%d", target.UserID)
+	}
+	return "username-" + strings.ToLower(strings.TrimPrefix(target.Username, "@"))
 }
 
 func (h *Handler) guestInlineArticle(session service.GuestSession, target command.Target, text string, resultID string) telegram.InlineQueryResultArticle {

@@ -191,6 +191,12 @@ type CancelGuestParams struct {
 	Now      time.Time
 }
 
+type CancelGuestRequestByIDParams struct {
+	RequestID uuid.UUID
+	SenderID  int64
+	Now       time.Time
+}
+
 type guestRequestRow struct {
 	ID                 uuid.UUID  `gorm:"column:id"`
 	TokenHash          []byte     `gorm:"column:token_hash"`
@@ -755,6 +761,27 @@ func (s *Store) CancelGuestRequest(ctx context.Context, params CancelGuestParams
 	return int(result.RowsAffected), nil
 }
 
+func (s *Store) CancelGuestRequestByID(ctx context.Context, params CancelGuestRequestByIDParams) error {
+	db, err := s.withContext(ctx)
+	if err != nil {
+		return err
+	}
+	if params.RequestID == uuid.Nil || params.SenderID <= 0 {
+		return fmt.Errorf("%w: guest request and sender are required", ErrInvalidInput)
+	}
+	result := db.Model(&guestRequestRow{}).
+		Where("id = ? AND sender_id = ? AND state IN (?, ?)", params.RequestID, params.SenderID,
+			GuestStateAwaitingSecret, GuestStateReady).
+		Updates(map[string]any{"state": GuestStateCancelled, "ingest_lease_until": nil, "opening_lease_until": nil, "updated_at": nowOr(params.Now)})
+	if result.Error != nil {
+		return translateError(result.Error)
+	}
+	if result.RowsAffected != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) FindGuestMediaPayload(ctx context.Context, requestID uuid.UUID) (GuestMediaBlob, error) {
 	db, err := s.withContext(ctx)
 	if err != nil {
@@ -1009,14 +1036,14 @@ func (s *Store) FindRecentTargetsForSender(ctx context.Context, senderID int64, 
 
 	err = db.Raw(`
 		WITH recent_targets AS (
-			SELECT 
+			SELECT
 				target_user_id,
-				target_username,
+				CASE WHEN target_user_id IS NULL THEN target_username END AS target_username,
 				MAX(created_at) AS last_used_at
 			FROM guest_secret_requests
 			WHERE sender_id = ?
 			  AND (target_user_id IS NOT NULL OR (target_username IS NOT NULL AND target_username <> ''))
-			GROUP BY target_user_id, target_username
+			GROUP BY target_user_id, CASE WHEN target_user_id IS NULL THEN target_username END
 			ORDER BY last_used_at DESC
 			LIMIT ?
 		)

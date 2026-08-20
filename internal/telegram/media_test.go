@@ -240,3 +240,26 @@ func TestSendPrivateMediaMultipart(t *testing.T) {
 		t.Fatalf("error exposed private media data: %v", err)
 	}
 }
+
+func TestSendPrivateMediaMultipartRejectsResponseWithoutMessageID(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, map[string]any{
+			"ok": true,
+			"result": map[string]any{
+				"chat": map[string]any{"id": 123, "type": "private"},
+			},
+		})
+	}))
+	defer server.Close()
+	client := mustClient(t, server.URL, DefaultMaxDownloadSize)
+
+	_, err := client.SendPrivateMedia(context.Background(), SendPrivateMediaRequest{
+		ChatID: 123, Type: domain.MediaVoice, Data: []byte("voice"), FileName: "voice.ogg",
+		ContentType: "audio/ogg",
+	})
+	if !errors.Is(err, ErrInvalidResponse) {
+		t.Fatalf("SendPrivateMedia() error = %v, want ErrInvalidResponse", err)
+	}
+}

@@ -49,6 +49,7 @@ type guestUseCases interface {
 	CreateGuestInlineSecret(context.Context, service.CreateGuestInlineParams) (service.GuestSession, error)
 	MarkGuestEnvelope(context.Context, string, string) error
 	CancelGuestRequest(context.Context, int64) (int, error)
+	CancelGuestRequestByID(context.Context, uuid.UUID, int64) error
 	BeginGuestSession(context.Context, string, domain.User) (service.GuestSession, error)
 	ClaimGuestIngestForSender(context.Context, int64) (service.GuestIngestClaim, error)
 	ReleaseGuestIngest(context.Context, service.GuestIngestClaim) error

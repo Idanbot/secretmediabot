@@ -278,8 +278,8 @@ func (c *Client) SendPrivateMedia(ctx context.Context, req SendPrivateMediaReque
 	if err := c.call(ctx, method, contentTypeHeader, body, &message); err != nil {
 		return Message{}, err
 	}
-	if message.Chat.ID == 0 {
-		return Message{}, &ProtocolError{Method: method, Reason: "result has no chat"}
+	if message.Chat.ID == 0 || message.MessageID <= 0 {
+		return Message{}, &ProtocolError{Method: method, Reason: "result has no chat or message ID"}
 	}
 	return message, nil
 }

@@ -22,6 +22,7 @@ const (
 	DefaultMaxDownloadSize = int64(20 << 20)
 	defaultHTTPTimeout     = 60 * time.Second
 	maxAPIResponseBytes    = int64(32 << 20)
+	maxInlineQueryResults  = 50
 )
 
 var (
@@ -298,8 +299,8 @@ func (c *Client) SendMessage(ctx context.Context, req SendMessageRequest) (Messa
 	if err := c.callJSON(ctx, "sendMessage", req, &message); err != nil {
 		return Message{}, err
 	}
-	if message.Chat.ID == 0 {
-		return Message{}, &ProtocolError{Method: "sendMessage", Reason: "result has no chat"}
+	if message.Chat.ID == 0 || (message.MessageID <= 0 && message.EphemeralMessageID <= 0) {
+		return Message{}, &ProtocolError{Method: "sendMessage", Reason: "result has no chat or message ID"}
 	}
 	return message, nil
 }
@@ -334,8 +335,7 @@ func (c *Client) AnswerCallbackQuery(ctx context.Context, req AnswerCallbackQuer
 }
 
 func (c *Client) AnswerGuestQuery(ctx context.Context, req AnswerGuestQueryRequest) (SentGuestMessage, error) {
-	if req.GuestQueryID == "" || req.Result.Type != "article" || req.Result.ID == "" || req.Result.Title == "" ||
-		req.Result.InputMessageContent.MessageText == "" {
+	if req.GuestQueryID == "" || validateInlineArticle(req.Result) != nil {
 		return SentGuestMessage{}, fmt.Errorf("%w: answerGuestQuery requires a guest query and article result", ErrInvalidArgument)
 	}
 	var message SentGuestMessage
@@ -349,10 +349,27 @@ func (c *Client) AnswerGuestQuery(ctx context.Context, req AnswerGuestQueryReque
 }
 
 func (c *Client) AnswerInlineQuery(ctx context.Context, req AnswerInlineQueryRequest) error {
-	if req.InlineQueryID == "" || len(req.Results) == 0 {
+	if req.InlineQueryID == "" || len(req.Results) == 0 || len(req.Results) > maxInlineQueryResults || req.CacheTime < 0 {
 		return fmt.Errorf("%w: answerInlineQuery requires an inline query and at least one result", ErrInvalidArgument)
 	}
+	seen := make(map[string]struct{}, len(req.Results))
+	for _, result := range req.Results {
+		if err := validateInlineArticle(result); err != nil {
+			return fmt.Errorf("%w: answerInlineQuery result: %v", ErrInvalidArgument, err)
+		}
+		if _, exists := seen[result.ID]; exists {
+			return fmt.Errorf("%w: answerInlineQuery result IDs must be unique", ErrInvalidArgument)
+		}
+		seen[result.ID] = struct{}{}
+	}
 	return c.callTrue(ctx, "answerInlineQuery", req)
+}
+
+func validateInlineArticle(result InlineQueryResultArticle) error {
+	if result.Type != "article" || result.ID == "" || result.Title == "" || result.InputMessageContent.MessageText == "" {
+		return errors.New("article result is missing type, ID, title, or message content")
+	}
+	return nil
 }
 
 func (c *Client) GetChatMember(ctx context.Context, req GetChatMemberRequest) (ChatMember, error) {

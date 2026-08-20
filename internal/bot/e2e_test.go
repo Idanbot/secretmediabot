@@ -568,6 +568,19 @@ func (s *e2eStore) CancelGuestRequest(ctx context.Context, params repository.Can
 	return count, nil
 }
 
+func (s *e2eStore) CancelGuestRequestByID(ctx context.Context, params repository.CancelGuestRequestByIDParams) error {
+	req, ok := s.guests[params.RequestID]
+	if !ok || req.SenderID != params.SenderID {
+		return repository.ErrNotFound
+	}
+	if req.State != repository.GuestStateAwaitingSecret && req.State != repository.GuestStateReady {
+		return repository.ErrNotFound
+	}
+	req.State = repository.GuestStateCancelled
+	s.guests[params.RequestID] = req
+	return nil
+}
+
 func (s *e2eStore) FindGuestMediaPayload(ctx context.Context, id uuid.UUID) (repository.GuestMediaBlob, error) {
 	if _, ok := s.guests[id]; !ok {
 		return repository.GuestMediaBlob{}, repository.ErrNotFound
@@ -592,7 +605,10 @@ func (s *e2eStore) FindRecentTargetsForSender(ctx context.Context, senderID int6
 	seen := make(map[string]bool)
 	for _, req := range s.guests {
 		if req.SenderID == senderID {
-			key := fmt.Sprintf("%v:%v", req.TargetUserID, req.TargetUsername)
+			key := "username:" + strings.ToLower(strings.TrimPrefix(req.TargetUsername, "@"))
+			if req.TargetUserID != nil {
+				key = fmt.Sprintf("user-id:%d", *req.TargetUserID)
+			}
 			if seen[key] {
 				continue
 			}
