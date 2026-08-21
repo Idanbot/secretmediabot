@@ -51,6 +51,7 @@ type Store interface {
 	CompleteOpen(context.Context, repository.CompleteOpenParams) error
 	FailOpen(context.Context, repository.FailOpenParams) error
 	OwnerListWhispers(context.Context, repository.OwnerListWhispersParams) ([]domain.Whisper, error)
+	OwnerListWhisperDetails(context.Context, repository.OwnerListWhispersParams) ([]domain.OwnerWhisper, error)
 	OwnerGetWhisper(context.Context, repository.OwnerGetWhisperParams) (domain.Whisper, error)
 	OwnerFetchEncryptedContent(context.Context, repository.OwnerGetWhisperParams) (repository.StoredContent, error)
 	OwnerDeleteWhisper(context.Context, repository.OwnerDeleteWhisperParams) error

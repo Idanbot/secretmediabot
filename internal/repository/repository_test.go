@@ -14,7 +14,7 @@ import (
 
 func TestWhisperMetadataProjectionExcludesSensitivePayloads(t *testing.T) {
 	t.Parallel()
-	query := strings.ToLower(whisperMetadataSelect + whisperMetadataJoins)
+	query := strings.ToLower(whisperMetadataSelect + whisperMetadataJoins + ownerWhisperIdentitySelect)
 	for _, forbidden := range []string{"ciphertext", "telegram_file_id", "telegram_file_unique_id", "nonce", "encryption_key_id"} {
 		if strings.Contains(query, forbidden) {
 			t.Errorf("metadata projection contains sensitive column %q", forbidden)

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -28,13 +27,13 @@ func (h *Handler) handleOwnerCommand(
 		return h.ownerMenu(ctx, message, owner.TelegramUserID)
 	case "owner_ephemeral":
 		return h.ownerEphemeral(ctx, message, parsed.Args)
-	case "owner_list":
-		return h.ownerList(ctx, message, owner.TelegramUserID, parsed.Args)
-	case "owner_open":
+	case "owner_list", "owner_sender", "owner_media", "owner_last":
+		return h.ownerList(ctx, message, owner.TelegramUserID, strings.TrimPrefix(parsed.Name, "owner_"), parsed.Args)
+	case "owner_open", "owner_review":
 		return h.ownerOpen(ctx, message, owner.TelegramUserID, parsed.Args)
 	case "owner_delete":
 		return h.ownerDelete(ctx, message, owner.TelegramUserID, parsed.Args)
-	case "owner_retain":
+	case "owner_retain", "owner_set_retention":
 		return h.ownerRetain(ctx, message, owner.TelegramUserID, parsed.Args)
 	default:
 		return nil
@@ -93,12 +92,15 @@ func (h *Handler) ownerMenu(ctx context.Context, message telegram.Message, owner
   /owner_ephemeral <duration> — Set custom delay (e.g. 10m)
 
 📋 Auditing & Whisper Management:
-• /owner_list — Browse retained whispers (tap-to-inspect)
-• /owner_open <whisper-uuid> — Review decrypted whisper payload
+• /owner_list — Browse retained whispers (tap an item to expand)
+• /owner_sender <id|@username> — Browse one sender
+• /owner_media <image|video|recording> — Browse a media category
+• /owner_last [image|video|recording] — Show the latest matching whisper
+• /owner_open <whisper-uuid> — Send decrypted content privately
 • /owner_delete <whisper-uuid> — Hard-delete whisper and payload
 • /owner_retain <whisper-uuid> <duration> — Adjust retention window`, buildSection.String(), ephemeralText)
 
-	return h.sendReply(ctx, message, text, nil)
+	return h.sendReply(ctx, message, text, ownerMenuMarkup())
 }
 
 func (h *Handler) ownerEphemeral(ctx context.Context, message telegram.Message, args string) error {
@@ -123,98 +125,6 @@ func (h *Handler) ownerEphemeral(ctx context.Context, message telegram.Message, 
 
 	h.service.SetEphemeralDeleteAfter(dur)
 	return h.sendReply(ctx, message, fmt.Sprintf("Self-destruction on open is now set to %s.", dur), nil)
-}
-
-func (h *Handler) ownerList(ctx context.Context, message telegram.Message, ownerID int64, args string) error {
-	limit := 20
-	offset := 0
-	fields := strings.Fields(args)
-	if len(fields) > 2 {
-		return h.sendReply(ctx, message, "Usage: /owner_list [limit 1-50] [offset >=0]", nil)
-	}
-	if len(fields) >= 1 {
-		parsed, err := strconv.Atoi(fields[0])
-		if err != nil || parsed < 1 || parsed > 50 {
-			return h.sendReply(ctx, message, "Usage: /owner_list [limit 1-50] [offset >=0]", nil)
-		}
-		limit = parsed
-	}
-	if len(fields) == 2 {
-		parsed, err := strconv.Atoi(fields[1])
-		if err != nil || parsed < 0 {
-			return h.sendReply(ctx, message, "Usage: /owner_list [limit 1-50] [offset >=0]", nil)
-		}
-		offset = parsed
-	}
-	whispers, err := h.service.OwnerList(ctx, ownerID, limit, offset)
-	if err != nil {
-		return err
-	}
-	if len(whispers) == 0 {
-		return h.sendReply(ctx, message, "No retained whispers.", nil)
-	}
-	var output strings.Builder
-	page := (offset / limit) + 1
-	fmt.Fprintf(&output, "📋 Retained Whispers (Page %d, showing %d items):\n", page, len(whispers))
-	for i, whisper := range whispers {
-		fmt.Fprintf(&output, "\n━━━━━━━━━━━━━━━━━━━\n")
-		fmt.Fprintf(&output, "📦 [%d] ID: %s\n", offset+i+1, whisper.ID)
-		fmt.Fprintf(&output, "• Type: %s\n", formatPayloadKind(whisper.Content.Kind))
-		fmt.Fprintf(&output, "• Status: %s\n", formatWhisperStatus(whisper.Status, whisper.PublishState))
-		fmt.Fprintf(&output, "• Parties: Sender %d ➔ Recipient %d\n", whisper.SenderID, whisper.RecipientID)
-		fmt.Fprintf(&output, "• Created: %s\n", whisper.CreatedAt.UTC().Format("2006-01-02 15:04:05 UTC"))
-		if !whisper.ExpiresAt.IsZero() {
-			fmt.Fprintf(&output, "• Expires: %s\n", whisper.ExpiresAt.UTC().Format("2006-01-02 15:04:05 UTC"))
-		}
-		fmt.Fprintf(&output, "• Actions:\n  /owner_open %s\n  /owner_delete %s\n  /owner_retain %s 720h",
-			whisper.ID, whisper.ID, whisper.ID)
-	}
-	var pagination []string
-	if offset > 0 {
-		prevOffset := offset - limit
-		if prevOffset < 0 {
-			prevOffset = 0
-		}
-		pagination = append(pagination, fmt.Sprintf("⬅️ Prev: /owner_list %d %d", limit, prevOffset))
-	}
-	if len(whispers) == limit {
-		pagination = append(pagination, fmt.Sprintf("➡️ Next: /owner_list %d %d", limit, offset+limit))
-	}
-	if len(pagination) > 0 {
-		fmt.Fprintf(&output, "\n\n━━━━━━━━━━━━━━━━━━━\n%s", strings.Join(pagination, " | "))
-	}
-	return h.sendLongReply(ctx, message, output.String())
-}
-
-func formatWhisperStatus(status domain.WhisperStatus, pub domain.PublishState) string {
-	switch status {
-	case domain.WhisperActive:
-		if pub == domain.PublishPublished {
-			return "🟢 Active (Published)"
-		}
-		return "🟢 Active"
-	case domain.WhisperOpening:
-		return "🟡 Opening"
-	case domain.WhisperOpened:
-		return "📬 Opened"
-	case domain.WhisperExpired:
-		return "⌛ Expired"
-	case domain.WhisperRevoked:
-		return "🚫 Revoked"
-	default:
-		return string(status)
-	}
-}
-
-func formatPayloadKind(kind domain.PayloadKind) string {
-	switch kind {
-	case domain.PayloadText:
-		return "📝 Text"
-	case domain.PayloadMedia:
-		return "🖼️ / 📁 Media"
-	default:
-		return string(kind)
-	}
 }
 
 func (h *Handler) ownerOpen(ctx context.Context, message telegram.Message, ownerID int64, args string) error {

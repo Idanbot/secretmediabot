@@ -122,6 +122,15 @@ type Whisper struct {
 	ContentDeletedAt       *time.Time
 }
 
+// OwnerWhisper is the metadata-only view used by privileged operational
+// tooling. Sender and Recipient contain identity labels only; secret text,
+// captions, media bytes, and Telegram file handles are never included.
+type OwnerWhisper struct {
+	Whisper   Whisper
+	Sender    User
+	Recipient User
+}
+
 type NewWhisperParams struct {
 	ID                  uuid.UUID
 	DraftID             uuid.UUID

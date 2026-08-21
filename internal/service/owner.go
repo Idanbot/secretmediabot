@@ -16,6 +16,17 @@ type OwnerReview struct {
 	Content PlaintextContent
 }
 
+// OwnerListOptions controls the metadata-only owner browser. MediaTypes is
+// intentionally a slice so a user-facing category such as "recording" can
+// include both voice notes and audio files.
+type OwnerListOptions struct {
+	Limit          int
+	Offset         int
+	SenderID       *int64
+	SenderUsername string
+	MediaTypes     []domain.MediaType
+}
+
 func (r *OwnerReview) Zero() {
 	r.Content.Zero()
 }
@@ -27,6 +38,60 @@ func (s *Service) OwnerList(ctx context.Context, ownerID int64, limit, offset in
 	return s.store.OwnerListWhispers(ctx, repository.OwnerListWhispersParams{
 		OwnerTelegramUserID: ownerID, Limit: limit, Offset: offset, Reason: "owner_command",
 	})
+}
+
+func (s *Service) OwnerListDetails(ctx context.Context, ownerID int64, options OwnerListOptions) ([]domain.OwnerWhisper, error) {
+	if !s.IsOwner(ownerID) {
+		return nil, ErrOwnerOnly
+	}
+	return s.store.OwnerListWhisperDetails(ctx, repository.OwnerListWhispersParams{
+		OwnerTelegramUserID: ownerID,
+		Limit:               options.Limit,
+		Offset:              options.Offset,
+		SenderID:            cloneOwnerInt64(options.SenderID),
+		SenderUsername:      options.SenderUsername,
+		MediaTypes:          append([]domain.MediaType(nil), options.MediaTypes...),
+		Reason:              "owner_command",
+	})
+}
+
+// OwnerMetadata reads only the safe metadata projection for an expanded list
+// item. Content decryption remains behind OwnerReview and the explicit
+// /owner_open action.
+func (s *Service) OwnerMetadata(ctx context.Context, ownerID int64, whisperID uuid.UUID) (domain.OwnerWhisper, error) {
+	if !s.IsOwner(ownerID) {
+		return domain.OwnerWhisper{}, ErrOwnerOnly
+	}
+	whisper, err := s.store.OwnerGetWhisper(ctx, repository.OwnerGetWhisperParams{
+		OwnerTelegramUserID: ownerID, WhisperID: whisperID, Reason: "owner_command",
+	})
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return domain.OwnerWhisper{}, ErrWhisperNotFound
+		}
+		return domain.OwnerWhisper{}, err
+	}
+
+	detail := domain.OwnerWhisper{
+		Whisper:   whisper,
+		Sender:    domain.User{TelegramUserID: whisper.SenderID},
+		Recipient: domain.User{TelegramUserID: whisper.RecipientID},
+	}
+	for userID, target := range map[int64]*domain.User{
+		whisper.SenderID:    &detail.Sender,
+		whisper.RecipientID: &detail.Recipient,
+	} {
+		user, lookupErr := s.store.FindObservedUserByID(ctx, whisper.SourceChatID, userID)
+		if lookupErr == nil {
+			*target = user
+			continue
+		}
+		if errors.Is(lookupErr, repository.ErrNotFound) {
+			continue
+		}
+		return domain.OwnerWhisper{}, lookupErr
+	}
+	return detail, nil
 }
 
 func (s *Service) OwnerReview(ctx context.Context, ownerID int64, whisperID uuid.UUID) (OwnerReview, error) {
@@ -114,4 +179,12 @@ func (s *Service) OwnerSetRetention(
 		return ErrWhisperNotFound
 	}
 	return err
+}
+
+func cloneOwnerInt64(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
 }

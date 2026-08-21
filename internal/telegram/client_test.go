@@ -347,6 +347,45 @@ func TestAnswerInlineQueryValidatesResultBatch(t *testing.T) {
 	}
 }
 
+func TestEditMessageTextSendsCompactOwnerViewUpdate(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/bot"+testToken+"/editMessageText" {
+			http.NotFound(w, r)
+			return
+		}
+		var body EditMessageTextRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode editMessageText request: %v", err)
+			return
+		}
+		if body.ChatID != 101 || body.MessageID != 77 || body.Text != "updated" || body.ReplyMarkup == nil {
+			t.Errorf("editMessageText body = %#v", body)
+		}
+		writeJSON(t, w, map[string]any{
+			"ok": true,
+			"result": map[string]any{
+				"message_id": 77,
+				"chat":       map[string]any{"id": 101, "type": "private"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := mustClient(t, server.URL, DefaultMaxDownloadSize)
+	message, err := client.EditMessageText(context.Background(), EditMessageTextRequest{
+		ChatID: 101, MessageID: 77, Text: "updated",
+		ReplyMarkup: &InlineKeyboardMarkup{InlineKeyboard: [][]InlineKeyboardButton{{{Text: "Next", CallbackData: "ol:p:a5"}}}},
+	})
+	if err != nil {
+		t.Fatalf("EditMessageText() error = %v", err)
+	}
+	if message.MessageID != 77 || message.Chat.ID != 101 {
+		t.Fatalf("EditMessageText() = %#v", message)
+	}
+}
+
 func TestSendMessageRejectsSuccessfulResponseWithoutMessageIdentity(t *testing.T) {
 	t.Parallel()
 

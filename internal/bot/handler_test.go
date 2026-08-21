@@ -42,6 +42,8 @@ type fakeUseCases struct {
 	whisperMediaErr      error
 	isOwner              func(int64) bool
 	ownerList            func(context.Context, int64, int, int) ([]domain.Whisper, error)
+	ownerListDetails     func(context.Context, int64, service.OwnerListOptions) ([]domain.OwnerWhisper, error)
+	ownerMetadata        func(context.Context, int64, uuid.UUID) (domain.OwnerWhisper, error)
 	ownerReview          func(context.Context, int64, uuid.UUID) (service.OwnerReview, error)
 	ownerDelete          func(context.Context, int64, uuid.UUID) error
 	ownerRetention       func(context.Context, int64, uuid.UUID, time.Duration) error
@@ -182,6 +184,32 @@ func (f *fakeUseCases) OwnerList(ctx context.Context, ownerID int64, limit, offs
 	return nil, nil
 }
 
+func (f *fakeUseCases) OwnerListDetails(ctx context.Context, ownerID int64, options service.OwnerListOptions) ([]domain.OwnerWhisper, error) {
+	if f.ownerListDetails != nil {
+		return f.ownerListDetails(ctx, ownerID, options)
+	}
+	whispers, err := f.OwnerList(ctx, ownerID, options.Limit, options.Offset)
+	if err != nil {
+		return nil, err
+	}
+	details := make([]domain.OwnerWhisper, 0, len(whispers))
+	for _, whisper := range whispers {
+		details = append(details, domain.OwnerWhisper{
+			Whisper:   whisper,
+			Sender:    domain.User{TelegramUserID: whisper.SenderID},
+			Recipient: domain.User{TelegramUserID: whisper.RecipientID},
+		})
+	}
+	return details, nil
+}
+
+func (f *fakeUseCases) OwnerMetadata(ctx context.Context, ownerID int64, id uuid.UUID) (domain.OwnerWhisper, error) {
+	if f.ownerMetadata != nil {
+		return f.ownerMetadata(ctx, ownerID, id)
+	}
+	return domain.OwnerWhisper{Whisper: domain.Whisper{ID: id}}, nil
+}
+
 func (f *fakeUseCases) OwnerReview(ctx context.Context, ownerID int64, id uuid.UUID) (service.OwnerReview, error) {
 	if f.ownerReview != nil {
 		return f.ownerReview(ctx, ownerID, id)
@@ -211,6 +239,7 @@ func (f *fakeUseCases) SetEphemeralDeleteAfter(d time.Duration) {}
 
 type fakeTelegram struct {
 	sendMessage              func(context.Context, telegram.SendMessageRequest) (telegram.Message, error)
+	editMessageText          func(context.Context, telegram.EditMessageTextRequest) (telegram.Message, error)
 	answerCallback           func(context.Context, telegram.AnswerCallbackQueryRequest) error
 	answerGuest              func(context.Context, telegram.AnswerGuestQueryRequest) (telegram.SentGuestMessage, error)
 	answerInline             func(context.Context, telegram.AnswerInlineQueryRequest) error
@@ -225,6 +254,7 @@ type fakeTelegram struct {
 	deleteMessage            func(context.Context, telegram.DeleteMessageRequest) error
 
 	messages       []telegram.SendMessageRequest
+	editedMessages []telegram.EditMessageTextRequest
 	answers        []telegram.AnswerCallbackQueryRequest
 	guestAnswers   []telegram.AnswerGuestQueryRequest
 	inlineAnswers  []telegram.AnswerInlineQueryRequest
@@ -241,6 +271,14 @@ func (f *fakeTelegram) SendMessage(ctx context.Context, request telegram.SendMes
 		return f.sendMessage(ctx, request)
 	}
 	return telegram.Message{MessageID: int64(len(f.messages)), Chat: telegram.Chat{ID: request.ChatID}}, nil
+}
+
+func (f *fakeTelegram) EditMessageText(ctx context.Context, request telegram.EditMessageTextRequest) (telegram.Message, error) {
+	f.editedMessages = append(f.editedMessages, request)
+	if f.editMessageText != nil {
+		return f.editMessageText(ctx, request)
+	}
+	return telegram.Message{MessageID: request.MessageID, Chat: telegram.Chat{ID: request.ChatID}}, nil
 }
 
 func (f *fakeTelegram) AnswerCallbackQuery(ctx context.Context, request telegram.AnswerCallbackQueryRequest) error {
@@ -1069,44 +1107,182 @@ func TestOwnerCommandsAuthorizeReviewAndDelete(t *testing.T) {
 	})
 }
 
-func TestOwnerListChunksLargeMetadataResponse(t *testing.T) {
-	whispers := make([]domain.Whisper, 50)
-	for index := range whispers {
-		whispers[index] = domain.Whisper{
-			ID: uuid.New(), SenderID: int64(1000 + index), RecipientID: int64(2000 + index),
-			Status: domain.WhisperActive, PublishState: domain.PublishPublished,
-			Content:   domain.ContentReference{Kind: domain.PayloadText},
-			CreatedAt: time.Date(2026, 8, 17, 12, index%60, 0, 0, time.UTC),
-		}
+func TestOwnerListRendersCompactParticipantAndMediaMetadata(t *testing.T) {
+	whispers := []domain.OwnerWhisper{
+		{
+			Whisper: domain.Whisper{
+				ID: uuid.New(), SenderID: 1001, RecipientID: 2001,
+				Status: domain.WhisperActive, PublishState: domain.PublishPublished,
+				Content:   domain.ContentReference{Kind: domain.PayloadMedia, Media: &domain.MediaReference{Type: domain.MediaVideo}},
+				CreatedAt: time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC),
+			},
+			Sender:    domain.User{TelegramUserID: 1001, FirstName: "Alice", Username: "alice_1"},
+			Recipient: domain.User{TelegramUserID: 2001, FirstName: "Bob", Username: "bob_1"},
+		},
+		{
+			Whisper: domain.Whisper{
+				ID: uuid.New(), SenderID: 1002, RecipientID: 2002,
+				Status: domain.WhisperOpened, PublishState: domain.PublishPublished,
+				Content:   domain.ContentReference{Kind: domain.PayloadMedia, Media: &domain.MediaReference{Type: domain.MediaPhoto}},
+				CreatedAt: time.Date(2026, 8, 17, 11, 0, 0, 0, time.UTC),
+			},
+			Sender:    domain.User{TelegramUserID: 1002, FirstName: "Carol"},
+			Recipient: domain.User{TelegramUserID: 2002, FirstName: "Dave"},
+		},
+	}
+	for len(whispers) < ownerPageSize {
+		copy := whispers[0]
+		copy.Whisper.ID = uuid.New()
+		copy.Whisper.SenderID += int64(len(whispers))
+		copy.Whisper.RecipientID += int64(len(whispers))
+		whispers = append(whispers, copy)
 	}
 	useCases := &fakeUseCases{
 		isOwner: func(int64) bool { return true },
-		ownerList: func(_ context.Context, ownerID int64, limit, offset int) ([]domain.Whisper, error) {
-			if ownerID != 101 || limit != 50 || offset != 100 {
-				t.Fatalf("owner list args = %d/%d/%d", ownerID, limit, offset)
+		ownerListDetails: func(_ context.Context, ownerID int64, options service.OwnerListOptions) ([]domain.OwnerWhisper, error) {
+			if ownerID != 101 || options.Limit != ownerPageSize || options.Offset != 0 {
+				t.Fatalf("owner list options = %d/%d", options.Limit, options.Offset)
 			}
 			return whispers, nil
 		},
 	}
 	tg := &fakeTelegram{}
-	if err := testHandler(useCases, tg).HandleUpdate(context.Background(), privateUpdate(101, "/owner_list 50 100")); err != nil {
+	if err := testHandler(useCases, tg).HandleUpdate(context.Background(), privateUpdate(101, "/owner_list")); err != nil {
 		t.Fatalf("HandleUpdate() error = %v", err)
 	}
-	if len(tg.messages) < 2 {
-		t.Fatalf("owner list messages = %d, want chunked response", len(tg.messages))
+	if len(tg.messages) != 1 {
+		t.Fatalf("owner list messages = %d, want one compact message", len(tg.messages))
 	}
-	var combined strings.Builder
-	for _, message := range tg.messages {
-		if length := len([]rune(message.Text)); length > 3500 {
-			t.Fatalf("owner list chunk length = %d", length)
+	if !strings.Contains(tg.messages[0].Text, "Alice (@alice_1) [1001]") ||
+		!strings.Contains(tg.messages[0].Text, "Bob (@bob_1) [2001]") ||
+		!strings.Contains(tg.messages[0].Text, "video") ||
+		!strings.Contains(tg.messages[0].Text, "image") {
+		t.Fatalf("owner list text = %q", tg.messages[0].Text)
+	}
+	markup := tg.messages[0].ReplyMarkup
+	if markup == nil || len(markup.InlineKeyboard) < len(whispers)+2 {
+		t.Fatalf("owner list keyboard = %#v", markup)
+	}
+	itemCallback := markup.InlineKeyboard[0][0].CallbackData
+	if len(itemCallback) > 64 || !strings.HasPrefix(itemCallback, ownerCallbackPrefix+"i:") {
+		t.Fatalf("owner item callback = %q, len=%d", itemCallback, len(itemCallback))
+	}
+	if markup.InlineKeyboard[len(whispers)][0].CallbackData != ownerCallbackPage(encodeOwnerState(ownerListQuery{Limit: ownerPageSize, Offset: ownerPageSize})) {
+		t.Fatalf("owner list omitted next-page button: %#v", markup.InlineKeyboard)
+	}
+}
+
+func TestOwnerListCommandsForwardSenderMediaAndLastFilters(t *testing.T) {
+	tests := []struct {
+		name       string
+		command    string
+		wantSender *int64
+		wantName   string
+		wantMedia  []domain.MediaType
+		wantLimit  int
+	}{
+		{name: "sender id", command: "/owner_sender 202", wantSender: int64Pointer(202), wantLimit: ownerPageSize},
+		{name: "sender username", command: "/owner_sender @alice_1", wantName: "alice_1", wantLimit: ownerPageSize},
+		{name: "recording category", command: "/owner_media recording", wantMedia: []domain.MediaType{domain.MediaVoice, domain.MediaAudio}, wantLimit: ownerPageSize},
+		{name: "last video", command: "/owner_last video", wantMedia: []domain.MediaType{domain.MediaVideo}, wantLimit: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			useCases := &fakeUseCases{
+				isOwner: func(int64) bool { return true },
+				ownerListDetails: func(_ context.Context, ownerID int64, options service.OwnerListOptions) ([]domain.OwnerWhisper, error) {
+					if ownerID != 101 || options.Limit != test.wantLimit || !equalInt64Pointer(options.SenderID, test.wantSender) ||
+						options.SenderUsername != test.wantName || !equalMediaTypes(options.MediaTypes, test.wantMedia) {
+						t.Fatalf("owner list options = %#v", options)
+					}
+					return nil, nil
+				},
+			}
+			tg := &fakeTelegram{}
+			if err := testHandler(useCases, tg).HandleUpdate(context.Background(), privateUpdate(101, test.command)); err != nil {
+				t.Fatalf("HandleUpdate() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestOwnerListItemCallbackExpandsSafeMetadata(t *testing.T) {
+	whisperID := uuid.New()
+	detail := domain.OwnerWhisper{
+		Whisper: domain.Whisper{
+			ID: whisperID, SenderID: 101, RecipientID: 202,
+			Status: domain.WhisperActive, PublishState: domain.PublishPublished,
+			Content:   domain.ContentReference{Kind: domain.PayloadMedia, Media: &domain.MediaReference{Type: domain.MediaVoice}},
+			CreatedAt: time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC),
+		},
+		Sender:    domain.User{TelegramUserID: 101, FirstName: "Sender", Username: "sender_1"},
+		Recipient: domain.User{TelegramUserID: 202, FirstName: "Receiver", Username: "receiver_1"},
+	}
+	useCases := &fakeUseCases{
+		isOwner: func(id int64) bool { return id == 101 },
+		ownerMetadata: func(_ context.Context, ownerID int64, id uuid.UUID) (domain.OwnerWhisper, error) {
+			if ownerID != 101 || id != whisperID {
+				t.Fatalf("owner metadata args = %d/%s", ownerID, id)
+			}
+			return detail, nil
+		},
+	}
+	state := encodeOwnerState(ownerListQuery{Limit: ownerPageSize, Offset: ownerPageSize})
+	tg := &fakeTelegram{}
+	update := telegram.Update{CallbackQuery: &telegram.CallbackQuery{
+		ID: "owner-callback-1", From: telegram.User{ID: 101},
+		Message: &telegram.Message{MessageID: 77, Chat: telegram.Chat{ID: 101, Type: "private"}},
+		Data:    ownerCallbackItem(whisperID, state),
+	}}
+	if err := testHandler(useCases, tg).HandleUpdate(context.Background(), update); err != nil {
+		t.Fatalf("HandleUpdate(owner item) error = %v", err)
+	}
+	if len(tg.editedMessages) != 1 || !strings.Contains(tg.editedMessages[0].Text, "Sender (@sender_1) [101]") ||
+		!strings.Contains(tg.editedMessages[0].Text, "Receiver (@receiver_1) [202]") ||
+		!strings.Contains(tg.editedMessages[0].Text, "voice recording") {
+		t.Fatalf("expanded owner metadata = %#v", tg.editedMessages)
+	}
+	if len(tg.answers) != 1 || !strings.Contains(tg.answers[0].Text, "Expanded") {
+		t.Fatalf("owner callback answers = %#v", tg.answers)
+	}
+}
+
+func int64Pointer(value int64) *int64 {
+	return &value
+}
+
+func equalInt64Pointer(left, right *int64) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return *left == *right
+}
+
+func equalMediaTypes(left, right []domain.MediaType) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
 		}
-		combined.WriteString(message.Text)
 	}
-	if !strings.Contains(combined.String(), whispers[0].ID.String()) || !strings.Contains(combined.String(), whispers[len(whispers)-1].ID.String()) {
-		t.Fatal("chunked owner list omitted metadata")
+	return true
+}
+
+func TestOwnerStatePreservesPageSizeAcrossCallbacks(t *testing.T) {
+	query := ownerListQuery{Limit: 12, Offset: 24, MediaFilter: "video", MediaTypes: []domain.MediaType{domain.MediaVideo}}
+	encoded := encodeOwnerState(query)
+	decoded, err := parseOwnerState(encoded)
+	if err != nil {
+		t.Fatalf("parseOwnerState(%q) error = %v", encoded, err)
 	}
-	if !strings.Contains(combined.String(), "/owner_list 50 150") {
-		t.Fatal("full owner list page omitted next-page hint")
+	if decoded.Limit != query.Limit || decoded.Offset != query.Offset || decoded.MediaFilter != query.MediaFilter ||
+		!equalMediaTypes(decoded.MediaTypes, query.MediaTypes) {
+		t.Fatalf("owner state = %#v, want %#v", decoded, query)
+	}
+	if len(ownerCallbackItem(uuid.New(), encoded)) > 64 {
+		t.Fatalf("owner item callback exceeds Telegram limit: %q", ownerCallbackItem(uuid.New(), encoded))
 	}
 }
 
@@ -1118,11 +1294,11 @@ func TestOwnerListPaginationArguments(t *testing.T) {
 		wantOffset int
 		valid      bool
 	}{
-		{name: "defaults", command: "/owner_list", wantLimit: 20, valid: true},
+		{name: "defaults", command: "/owner_list", wantLimit: ownerPageSize, valid: true},
 		{name: "limit only", command: "/owner_list 12", wantLimit: 12, valid: true},
 		{name: "limit and offset", command: "/owner_list 12 24", wantLimit: 12, wantOffset: 24, valid: true},
 		{name: "zero limit", command: "/owner_list 0", valid: false},
-		{name: "excessive limit", command: "/owner_list 51", valid: false},
+		{name: "excessive limit", command: "/owner_list 21", valid: false},
 		{name: "negative offset", command: "/owner_list 20 -1", valid: false},
 		{name: "extra argument", command: "/owner_list 20 0 extra", valid: false},
 	}

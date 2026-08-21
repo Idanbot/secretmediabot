@@ -218,6 +218,14 @@ type SendMessageRequest struct {
 	ReplyMarkup         *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
 }
 
+type EditMessageTextRequest struct {
+	ChatID      int64                 `json:"chat_id"`
+	MessageID   int64                 `json:"message_id"`
+	Text        string                `json:"text"`
+	ParseMode   string                `json:"parse_mode,omitempty"`
+	ReplyMarkup *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
+}
+
 type SendEphemeralTextRequest struct {
 	ChatID          int64
 	MessageThreadID *int64

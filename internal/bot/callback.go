@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/idan/secretmediabot/internal/domain"
@@ -16,6 +17,9 @@ const ephemeralSendTimeout = 12 * time.Second
 func (h *Handler) handleCallback(ctx context.Context, callback telegram.CallbackQuery) error {
 	if callback.ID == "" || callback.From.ID <= 0 {
 		return nil
+	}
+	if strings.HasPrefix(callback.Data, ownerCallbackPrefix) {
+		return h.handleOwnerCallback(ctx, callback)
 	}
 	if callback.Message == nil || callback.Message.Chat.ID == 0 {
 		return h.answerCallback(ctx, callback.ID, "This whisper cannot be opened here.", true)

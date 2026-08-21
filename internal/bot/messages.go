@@ -123,7 +123,7 @@ func (h *Handler) handlePrivateMessage(ctx context.Context, message telegram.Mes
 			return h.sendReply(ctx, message, privacyText, nil)
 		case "cancel":
 			return h.handleCancel(ctx, message, sender)
-		case "owner_list", "owner_open", "owner_delete", "owner_retain", "owner_menu", "owner_ephemeral":
+		case "owner_list", "owner_sender", "owner_media", "owner_last", "owner_open", "owner_review", "owner_delete", "owner_retain", "owner_set_retention", "owner_menu", "owner_ephemeral":
 			return h.handleOwnerCommand(ctx, message, sender, parsed)
 		default:
 			return h.sendReply(ctx, message, "Unknown command. Use /help.", nil)
@@ -499,50 +499,6 @@ func (h *Handler) sendReply(
 		ReplyMarkup: markup,
 	})
 	return err
-}
-
-func (h *Handler) sendLongReply(ctx context.Context, message telegram.Message, text string) error {
-	chunks := splitMessage(text, 3500)
-	for index, chunk := range chunks {
-		request := telegram.SendMessageRequest{
-			ChatID: message.Chat.ID, MessageThreadID: optionalMessageID(message.MessageThreadID), Text: chunk,
-		}
-		if index == 0 {
-			request.ReplyParameters = &telegram.ReplyParameters{MessageID: optionalMessageID(message.MessageID)}
-		}
-		requestCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
-		_, err := h.telegram.SendMessage(requestCtx, request)
-		cancel()
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func splitMessage(value string, maxRunes int) []string {
-	if maxRunes <= 0 {
-		return nil
-	}
-	runes := []rune(value)
-	if len(runes) <= maxRunes {
-		return []string{value}
-	}
-	chunks := make([]string, 0, (len(runes)+maxRunes-1)/maxRunes)
-	for len(runes) > 0 {
-		end := min(len(runes), maxRunes)
-		if end < len(runes) {
-			for index := end; index > maxRunes/2; index-- {
-				if runes[index-1] == '\n' {
-					end = index
-					break
-				}
-			}
-		}
-		chunks = append(chunks, string(runes[:end]))
-		runes = runes[end:]
-	}
-	return chunks
 }
 
 func composeURL(botUsername, parameter string) string {

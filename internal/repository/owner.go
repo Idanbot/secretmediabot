@@ -14,6 +14,21 @@ import (
 // OwnerListWhispers returns metadata only. The service must authenticate the
 // configured owner ID before calling any Owner-prefixed method.
 func (s *Store) OwnerListWhispers(ctx context.Context, params OwnerListWhispersParams) ([]domain.Whisper, error) {
+	details, err := s.OwnerListWhisperDetails(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+	whispers := make([]domain.Whisper, 0, len(details))
+	for _, detail := range details {
+		whispers = append(whispers, detail.Whisper)
+	}
+	return whispers, nil
+}
+
+// OwnerListWhisperDetails returns metadata plus the latest non-secret
+// display labels for both participants. It never selects encrypted payloads,
+// Telegram file IDs, or decrypted content.
+func (s *Store) OwnerListWhisperDetails(ctx context.Context, params OwnerListWhispersParams) ([]domain.OwnerWhisper, error) {
 	limit, offset, err := normalizeOwnerListPage(params.Limit, params.Offset)
 	if err != nil {
 		return nil, err
@@ -25,31 +40,55 @@ func (s *Store) OwnerListWhispers(ctx context.Context, params OwnerListWhispersP
 	if params.OwnerTelegramUserID <= 0 {
 		return nil, fmt.Errorf("%w: owner ID must be positive", ErrInvalidInput)
 	}
-	var whispers []domain.Whisper
+	if params.SenderID != nil && *params.SenderID <= 0 {
+		return nil, fmt.Errorf("%w: sender ID must be positive", ErrInvalidInput)
+	}
+	senderUsername := normalizeUsername(params.SenderUsername)
+	if params.SenderUsername != "" && senderUsername == "" {
+		return nil, fmt.Errorf("%w: sender username is required", ErrInvalidInput)
+	}
+	for _, mediaType := range params.MediaTypes {
+		if !mediaType.IsValid() {
+			return nil, fmt.Errorf("%w: invalid owner media type", ErrInvalidInput)
+		}
+	}
+	var details []domain.OwnerWhisper
 	err = db.Transaction(func(tx *gorm.DB) error {
-		query := whisperMetadataQuery(tx).
+		query := ownerWhisperMetadataQuery(tx).
 			Order("w.created_at DESC, w.id DESC").
 			Limit(limit).
 			Offset(offset)
 		if params.Before != nil {
 			query = query.Where("w.created_at < ?", params.Before.UTC())
 		}
+		if params.SenderID != nil {
+			query = query.Where("w.sender_id = ?", *params.SenderID)
+		}
+		if senderUsername != "" {
+			query = query.Where("owner_sender.username_normalized = ?", senderUsername)
+		}
+		if len(params.MediaTypes) > 0 {
+			query = query.Where("w.payload_kind = ? AND w.media_type IN ?", domain.PayloadMedia, params.MediaTypes)
+		}
 		var records []whisperProjection
 		if err := query.Find(&records).Error; err != nil {
 			return translateError(err)
 		}
-		whispers = make([]domain.Whisper, 0, len(records))
+		details = make([]domain.OwnerWhisper, 0, len(records))
 		for _, record := range records {
-			whisper, err := record.toDomain(nil)
+			detail, err := record.toOwnerDomain()
 			if err != nil {
 				return err
 			}
-			whispers = append(whispers, whisper)
+			details = append(details, detail)
 		}
 		return insertOwnerAudit(tx, params.OwnerTelegramUserID, nil, domain.OwnerAuditViewMetadata, params.Reason,
-			map[string]any{"result_count": len(whispers), "limit": limit, "offset": offset})
+			map[string]any{"result_count": len(details), "limit": limit, "offset": offset})
 	})
-	return whispers, err
+	if err != nil {
+		return nil, err
+	}
+	return details, nil
 }
 
 func normalizeOwnerListPage(limit, offset int) (int, int, error) {

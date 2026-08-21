@@ -228,6 +228,9 @@ type OwnerListWhispersParams struct {
 	Before              *time.Time
 	Limit               int
 	Offset              int
+	SenderID            *int64
+	SenderUsername      string
+	MediaTypes          []domain.MediaType
 	Reason              string
 }
 

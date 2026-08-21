@@ -316,6 +316,22 @@ func (s *e2eStore) OwnerListWhispers(ctx context.Context, params repository.Owne
 	return list, nil
 }
 
+func (s *e2eStore) OwnerListWhisperDetails(ctx context.Context, params repository.OwnerListWhispersParams) ([]domain.OwnerWhisper, error) {
+	list, err := s.OwnerListWhispers(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+	details := make([]domain.OwnerWhisper, 0, len(list))
+	for _, whisper := range list {
+		details = append(details, domain.OwnerWhisper{
+			Whisper:   whisper,
+			Sender:    s.users[whisper.SenderID],
+			Recipient: s.users[whisper.RecipientID],
+		})
+	}
+	return details, nil
+}
+
 func (s *e2eStore) OwnerGetWhisper(ctx context.Context, params repository.OwnerGetWhisperParams) (domain.Whisper, error) {
 	if w, ok := s.whispers[params.WhisperID]; ok {
 		return w, nil

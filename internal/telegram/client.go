@@ -305,6 +305,17 @@ func (c *Client) SendMessage(ctx context.Context, req SendMessageRequest) (Messa
 	return message, nil
 }
 
+func (c *Client) EditMessageText(ctx context.Context, req EditMessageTextRequest) (Message, error) {
+	if req.ChatID == 0 || req.MessageID <= 0 || req.Text == "" {
+		return Message{}, fmt.Errorf("%w: editMessageText requires chat ID, message ID, and text", ErrInvalidArgument)
+	}
+	var message Message
+	if err := c.callJSON(ctx, "editMessageText", req, &message); err != nil {
+		return Message{}, err
+	}
+	return message, nil
+}
+
 func (c *Client) SendEphemeralText(ctx context.Context, req SendEphemeralTextRequest) (int64, error) {
 	if req.ReceiverUserID <= 0 {
 		return 0, fmt.Errorf("%w: ephemeral text requires a receiver user ID", ErrInvalidArgument)

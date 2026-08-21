@@ -37,6 +37,8 @@ type useCases interface {
 	HasActiveDraft(context.Context, int64) (bool, error)
 	IsOwner(int64) bool
 	OwnerList(context.Context, int64, int, int) ([]domain.Whisper, error)
+	OwnerListDetails(context.Context, int64, service.OwnerListOptions) ([]domain.OwnerWhisper, error)
+	OwnerMetadata(context.Context, int64, uuid.UUID) (domain.OwnerWhisper, error)
 	OwnerReview(context.Context, int64, uuid.UUID) (service.OwnerReview, error)
 	OwnerDelete(context.Context, int64, uuid.UUID) error
 	OwnerSetRetention(context.Context, int64, uuid.UUID, time.Duration) error
@@ -64,6 +66,7 @@ type guestUseCases interface {
 
 type telegramAPI interface {
 	SendMessage(context.Context, telegram.SendMessageRequest) (telegram.Message, error)
+	EditMessageText(context.Context, telegram.EditMessageTextRequest) (telegram.Message, error)
 	AnswerCallbackQuery(context.Context, telegram.AnswerCallbackQueryRequest) error
 	AnswerGuestQuery(context.Context, telegram.AnswerGuestQueryRequest) (telegram.SentGuestMessage, error)
 	AnswerInlineQuery(context.Context, telegram.AnswerInlineQueryRequest) error

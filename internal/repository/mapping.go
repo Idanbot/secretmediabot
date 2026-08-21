@@ -65,10 +65,32 @@ type whisperProjection struct {
 	TextBlobID              *uuid.UUID `gorm:"column:text_blob_id"`
 	TextRetainUntil         *time.Time `gorm:"column:text_retain_until"`
 	CaptionBlobID           *uuid.UUID `gorm:"column:caption_blob_id"`
+	OwnerSenderUsername     string     `gorm:"column:owner_sender_username"`
+	OwnerSenderFirstName    string     `gorm:"column:owner_sender_first_name"`
+	OwnerSenderLastName     string     `gorm:"column:owner_sender_last_name"`
+	OwnerRecipientUsername  string     `gorm:"column:owner_recipient_username"`
+	OwnerRecipientFirstName string     `gorm:"column:owner_recipient_first_name"`
+	OwnerRecipientLastName  string     `gorm:"column:owner_recipient_last_name"`
 }
 
 func whisperMetadataQuery(db *gorm.DB) *gorm.DB {
 	return db.Table("whispers AS w").Select(whisperMetadataSelect).Joins(whisperMetadataJoins)
+}
+
+const ownerWhisperIdentitySelect = `
+    COALESCE(owner_sender.username, '') AS owner_sender_username,
+    COALESCE(owner_sender.first_name, '') AS owner_sender_first_name,
+    COALESCE(owner_sender.last_name, '') AS owner_sender_last_name,
+    COALESCE(owner_recipient.username, '') AS owner_recipient_username,
+    COALESCE(owner_recipient.first_name, '') AS owner_recipient_first_name,
+    COALESCE(owner_recipient.last_name, '') AS owner_recipient_last_name`
+
+func ownerWhisperMetadataQuery(db *gorm.DB) *gorm.DB {
+	return db.Table("whispers AS w").
+		Select(whisperMetadataSelect + "," + ownerWhisperIdentitySelect).
+		Joins(whisperMetadataJoins).
+		Joins("LEFT JOIN users AS owner_sender ON owner_sender.telegram_user_id = w.sender_id").
+		Joins("LEFT JOIN users AS owner_recipient ON owner_recipient.telegram_user_id = w.recipient_id")
 }
 
 func loadWhisperProjection(db *gorm.DB, whisperID uuid.UUID) (whisperProjection, error) {
@@ -155,6 +177,28 @@ func (r whisperProjection) toDomain(openTokenHash []byte) (domain.Whisper, error
 		w.OpeningCallbackQueryID = *r.OpeningCallbackQueryID
 	}
 	return w, nil
+}
+
+func (r whisperProjection) toOwnerDomain() (domain.OwnerWhisper, error) {
+	whisper, err := r.toDomain(nil)
+	if err != nil {
+		return domain.OwnerWhisper{}, err
+	}
+	return domain.OwnerWhisper{
+		Whisper: whisper,
+		Sender: domain.User{
+			TelegramUserID: whisper.SenderID,
+			Username:       r.OwnerSenderUsername,
+			FirstName:      r.OwnerSenderFirstName,
+			LastName:       r.OwnerSenderLastName,
+		},
+		Recipient: domain.User{
+			TelegramUserID: whisper.RecipientID,
+			Username:       r.OwnerRecipientUsername,
+			FirstName:      r.OwnerRecipientFirstName,
+			LastName:       r.OwnerRecipientLastName,
+		},
+	}, nil
 }
 
 func (r userRow) toDomain() domain.User {

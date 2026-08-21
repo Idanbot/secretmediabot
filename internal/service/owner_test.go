@@ -55,6 +55,64 @@ func TestOwnerListForwardsBoundedPage(t *testing.T) {
 	}
 }
 
+func TestOwnerListDetailsForwardsParticipantAndMediaFilters(t *testing.T) {
+	t.Parallel()
+
+	store := newMemoryStore()
+	store.ownerWhispers = []domain.Whisper{{
+		ID: uuid.New(), SenderID: 202, RecipientID: 303,
+		Content: domain.ContentReference{Kind: domain.PayloadMedia, Media: &domain.MediaReference{Type: domain.MediaVideo}},
+	}}
+	store.users[202] = domain.User{TelegramUserID: 202, FirstName: "Sender"}
+	store.users[303] = domain.User{TelegramUserID: 303, FirstName: "Receiver"}
+	service, _ := newTestService(t, store, validServiceOptions())
+	mediaTypes := []domain.MediaType{domain.MediaVoice, domain.MediaAudio}
+	senderID := int64(202)
+	details, err := service.OwnerListDetails(context.Background(), 9001, OwnerListOptions{
+		Limit: 5, Offset: 10, SenderID: &senderID, MediaTypes: mediaTypes,
+	})
+	if err != nil {
+		t.Fatalf("OwnerListDetails() error = %v", err)
+	}
+	if len(details) != 1 || details[0].Sender.DisplayName() != "Sender" || details[0].Recipient.DisplayName() != "Receiver" {
+		t.Fatalf("owner details = %#v", details)
+	}
+	if len(store.ownerLists) != 1 {
+		t.Fatalf("owner list calls = %d, want 1", len(store.ownerLists))
+	}
+	params := store.ownerLists[0]
+	if params.SenderID == nil || *params.SenderID != senderID || len(params.MediaTypes) != 2 ||
+		params.MediaTypes[0] != domain.MediaVoice || params.MediaTypes[1] != domain.MediaAudio ||
+		params.Limit != 5 || params.Offset != 10 {
+		t.Fatalf("owner list filter params = %#v", params)
+	}
+}
+
+func TestOwnerMetadataLoadsParticipantLabelsWithoutDecryptingContent(t *testing.T) {
+	t.Parallel()
+
+	store := newMemoryStore()
+	whisperID := uuid.New()
+	store.ownerWhisper = domain.Whisper{
+		ID: whisperID, SenderID: 202, RecipientID: 303, SourceChatID: -1001,
+		Content: domain.ContentReference{Kind: domain.PayloadText},
+	}
+	store.addMember(-1001, domain.User{TelegramUserID: 202, FirstName: "Sender", Username: "sender_1"})
+	store.addMember(-1001, domain.User{TelegramUserID: 303, FirstName: "Receiver", Username: "receiver_1"})
+	service, _ := newTestService(t, store, validServiceOptions())
+
+	detail, err := service.OwnerMetadata(context.Background(), 9001, whisperID)
+	if err != nil {
+		t.Fatalf("OwnerMetadata() error = %v", err)
+	}
+	if detail.Sender.DisplayName() != "Sender" || detail.Recipient.DisplayName() != "Receiver" {
+		t.Fatalf("owner participant labels = %#v", detail)
+	}
+	if store.ownerGetCalls != 1 || store.ownerReadCalls != 0 {
+		t.Fatalf("owner metadata store reads = metadata %d content %d", store.ownerGetCalls, store.ownerReadCalls)
+	}
+}
+
 func TestOwnerReviewDecryptsRetainedMediaAndZeroErasesPlaintext(t *testing.T) {
 	t.Parallel()
 

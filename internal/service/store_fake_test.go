@@ -244,6 +244,24 @@ func (s *memoryStore) OwnerListWhispers(_ context.Context, params repository.Own
 	return append([]domain.Whisper(nil), s.ownerWhispers...), s.ownerErr
 }
 
+func (s *memoryStore) OwnerListWhisperDetails(ctx context.Context, params repository.OwnerListWhispersParams) ([]domain.OwnerWhisper, error) {
+	whispers, err := s.OwnerListWhispers(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	details := make([]domain.OwnerWhisper, 0, len(whispers))
+	for _, whisper := range whispers {
+		details = append(details, domain.OwnerWhisper{
+			Whisper:   whisper,
+			Sender:    s.users[whisper.SenderID],
+			Recipient: s.users[whisper.RecipientID],
+		})
+	}
+	return details, nil
+}
+
 func (s *memoryStore) OwnerGetWhisper(context.Context, repository.OwnerGetWhisperParams) (domain.Whisper, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

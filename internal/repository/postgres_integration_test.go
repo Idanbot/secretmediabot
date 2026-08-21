@@ -386,8 +386,8 @@ func testFinalizeEncryptedCardinalityAndRollback(t *testing.T, test postgresTest
 	t.Helper()
 	ctx := context.Background()
 	chat := domain.Chat{TelegramChatID: -30001, Type: domain.ChatTypeSupergroup, Title: "finalize"}
-	sender := domain.User{TelegramUserID: 301, Username: "sender"}
-	recipient := domain.User{TelegramUserID: 302, Username: "recipient"}
+	sender := domain.User{TelegramUserID: 301, Username: "sender", FirstName: "Sender"}
+	recipient := domain.User{TelegramUserID: 302, Username: "recipient", FirstName: "Receiver"}
 	observeMembership(t, test.store, sender, chat, test.now)
 	observeMembership(t, test.store, recipient, chat, test.now)
 
@@ -489,6 +489,19 @@ func testFinalizeEncryptedCardinalityAndRollback(t *testing.T, test postgresTest
 	})
 	if err != nil || len(secondPage) != 1 || secondPage[0].ID != textWhisper.ID {
 		t.Fatalf("owner second page = %#v, %v; want text whisper", secondPage, err)
+	}
+	senderID := sender.TelegramUserID
+	details, err := test.store.OwnerListWhisperDetails(ctx, repository.OwnerListWhispersParams{
+		OwnerTelegramUserID: ownerID, Limit: 5, SenderID: &senderID,
+		MediaTypes: []domain.MediaType{domain.MediaVoice, domain.MediaAudio}, Reason: "details_filter_test",
+	})
+	if err != nil || len(details) != 1 || details[0].Whisper.ID != mediaWhisper.ID {
+		t.Fatalf("owner filtered details = %#v, %v; want media whisper", details, err)
+	}
+	if details[0].Sender.DisplayName() != sender.DisplayName() || details[0].Recipient.DisplayName() != recipient.DisplayName() {
+		t.Fatalf("owner participant labels = %q -> %q, %q -> %q",
+			details[0].Sender.DisplayName(), sender.DisplayName(),
+			details[0].Recipient.DisplayName(), recipient.DisplayName())
 	}
 
 	rollbackDraft, rollbackLease := createAndClaimDraft(t, test.store, sender.TelegramUserID, recipient.TelegramUserID, chat.TelegramChatID, test.now.Add(4*time.Second), "rollback")

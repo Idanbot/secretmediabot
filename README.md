@@ -207,10 +207,15 @@ Accounts configured in `OWNER_TELEGRAM_IDS` have access to operational maintenan
 
 | Command | Where | Behavior |
 | --- | --- | --- |
-| `/owner_list [limit]` | Private chat | List recent whispers for operational auditing. |
-| `/owner_review <id>` | Private chat | Review metadata and delivery status for a specific whisper ID. |
+| `/owner_menu` | Private chat | Open the operator menu and compact whisper browser. |
+| `/owner_list [page-size] [offset]` | Private chat | Browse retained whispers with expandable Telegram buttons and paging. |
+| `/owner_sender <id\|@username>` | Private chat | Browse whispers sent by one Telegram user. |
+| `/owner_media <image\|video\|recording>` | Private chat | Browse a media category; recording includes voice notes and audio files. |
+| `/owner_last [media-type]` | Private chat | Show the latest whisper, optionally limited to a media category. |
+| `/owner_open <id>` (`/owner_review`) | Private chat | Review and send decrypted content privately for a specific whisper ID. |
 | `/owner_delete <id>` | Private chat | Hard-delete a stored whisper and its encrypted payloads immediately. |
-| `/owner_set_retention <id> <duration>` | Private chat | Adjust retention window for a specific whisper. |
+| `/owner_retain <id> <duration>` (`/owner_set_retention`) | Private chat | Adjust retention window for a specific whisper. |
+| `/owner_ephemeral <duration\|off>` | Private chat | Configure self-destruction after owner opens content. |
 
 ## Development
 
