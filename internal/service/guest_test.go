@@ -72,8 +72,10 @@ func TestServiceStructsRedactCallbackTokens(t *testing.T) {
 
 type fakeGuestStore struct {
 	GuestStore
-	recentTargets []domain.RecentTarget
-	recentCalls   int
+	recentTargets  []domain.RecentTarget
+	recentCalls    int
+	cancelByID     func(context.Context, repository.CancelGuestRequestByIDParams) error
+	cancelByIDCall repository.CancelGuestRequestByIDParams
 }
 
 func (f *fakeGuestStore) CreateGuestRequest(ctx context.Context, params repository.GuestCreateParams) (repository.GuestRequest, error) {
@@ -86,6 +88,14 @@ func (f *fakeGuestStore) FindRecentTargetsForSender(_ context.Context, _ int64, 
 		limit = len(f.recentTargets)
 	}
 	return append([]domain.RecentTarget(nil), f.recentTargets[:limit]...), nil
+}
+
+func (f *fakeGuestStore) CancelGuestRequestByID(ctx context.Context, params repository.CancelGuestRequestByIDParams) error {
+	f.cancelByIDCall = params
+	if f.cancelByID != nil {
+		return f.cancelByID(ctx, params)
+	}
+	return nil
 }
 
 func TestCreateGuestRequestRejectsSelfTargeting(t *testing.T) {
@@ -167,6 +177,28 @@ func TestCreateGuestInlineSecret(t *testing.T) {
 	})
 	if !errors.Is(err, ErrGuestInvalidRequest) {
 		t.Fatalf("missing inline query ID error = %v, want ErrGuestInvalidRequest", err)
+	}
+}
+
+func TestCancelGuestRequestByIDForwardsIdentityAndMapsNotFound(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	requestID := uuid.New()
+	store := &fakeGuestStore{cancelByID: func(context.Context, repository.CancelGuestRequestByIDParams) error {
+		return repository.ErrNotFound
+	}}
+	svc := &Service{
+		guestStore: store,
+		now:        func() time.Time { return now },
+	}
+
+	err := svc.CancelGuestRequestByID(context.Background(), requestID, 101)
+	if !errors.Is(err, ErrGuestNotFound) {
+		t.Fatalf("CancelGuestRequestByID() error = %v, want ErrGuestNotFound", err)
+	}
+	if store.cancelByIDCall.RequestID != requestID || store.cancelByIDCall.SenderID != 101 || !store.cancelByIDCall.Now.Equal(now) {
+		t.Fatalf("cancel parameters = %+v, want request %s, sender 101, now %s", store.cancelByIDCall, requestID, now)
 	}
 }
 

@@ -396,6 +396,23 @@ func TestInlineQuerySeparatesInstantTextAndMediaResultIDs(t *testing.T) {
 	}
 }
 
+func TestRecentInlineQueryIDNamespacesTargetKinds(t *testing.T) {
+	t.Parallel()
+
+	queryID := "inline-query"
+	userTarget := command.Target{Kind: command.TargetUserID, UserID: 202}
+	usernameTarget := command.Target{Kind: command.TargetUsername, Username: "user-id-202"}
+	if got, want := recentInlineQueryID(queryID, userTarget), "inline-query-recent-user-id-202"; got != want {
+		t.Fatalf("recentInlineQueryID(user ID) = %q, want %q", got, want)
+	}
+	if got, want := recentInlineQueryID(queryID, usernameTarget), "inline-query-recent-username-user-id-202"; got != want {
+		t.Fatalf("recentInlineQueryID(username) = %q, want %q", got, want)
+	}
+	if recentInlineQueryID(queryID, userTarget) == recentInlineQueryID(queryID, usernameTarget) {
+		t.Fatal("recent inline query ID namespaces collided across target kinds")
+	}
+}
+
 func TestInlineQueryPermanentAnswerFailureCancelsReadyPreview(t *testing.T) {
 	tg := &fakeTelegram{
 		answerInline: func(context.Context, telegram.AnswerInlineQueryRequest) error {
@@ -426,6 +443,37 @@ func TestInlineQueryPermanentAnswerFailureCancelsReadyPreview(t *testing.T) {
 	}
 	if cancelledID == uuid.Nil || cancelledSender != 101 {
 		t.Fatalf("cancelled preview = %s/%d, want generated request and sender 101", cancelledID, cancelledSender)
+	}
+}
+
+func TestInlineQueryTransientAnswerFailureKeepsReadyPreview(t *testing.T) {
+	tg := &fakeTelegram{
+		answerInline: func(context.Context, telegram.AnswerInlineQueryRequest) error {
+			return &telegram.APIError{ErrorCode: 500, Description: "temporary outage"}
+		},
+	}
+	cancelCalls := 0
+	guest := &fakeGuestUseCases{
+		cancelByID: func(context.Context, uuid.UUID, int64) error {
+			cancelCalls++
+			return nil
+		},
+	}
+	h := testHandler(&fakeUseCases{}, tg)
+	h.guest = guest
+
+	err := h.HandleUpdate(context.Background(), telegram.Update{
+		InlineQuery: &telegram.InlineQuery{
+			ID:    "query_keep_preview",
+			From:  telegram.User{ID: 101, Username: "sender_user"},
+			Query: "@target_user retryable preview",
+		},
+	})
+	if err == nil || telegram.IsPermanent(err) {
+		t.Fatalf("HandleUpdate() error = %v, want transient Telegram error", err)
+	}
+	if cancelCalls != 0 {
+		t.Fatalf("preview cancellation calls = %d, want 0 for transient failure", cancelCalls)
 	}
 }
 
