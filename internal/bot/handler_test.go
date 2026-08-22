@@ -1328,3 +1328,168 @@ func TestOwnerListPaginationArguments(t *testing.T) {
 		})
 	}
 }
+
+func TestOwnerListQueryParsesCommandAliasesAndRejectsInvalidFilters(t *testing.T) {
+	tests := []struct {
+		name            string
+		mode            string
+		args            string
+		wantLimit       int
+		wantSender      *int64
+		wantUsername    string
+		wantMediaFilter string
+		wantMediaTypes  []domain.MediaType
+		wantLast        bool
+		valid           bool
+	}{
+		{name: "default list", mode: "list", wantLimit: ownerPageSize, valid: true},
+		{name: "nested sender username", mode: "list", args: "sender @alice_1", wantLimit: ownerPageSize, wantUsername: "alice_1", valid: true},
+		{name: "nested recording alias", mode: "list", args: "media recordings", wantLimit: ownerPageSize, wantMediaFilter: "recording", wantMediaTypes: []domain.MediaType{domain.MediaVoice, domain.MediaAudio}, valid: true},
+		{name: "sender command", mode: "sender", args: "202", wantLimit: ownerPageSize, wantSender: int64Pointer(202), valid: true},
+		{name: "media command", mode: "media", args: "audio", wantLimit: ownerPageSize, wantMediaFilter: "audio", wantMediaTypes: []domain.MediaType{domain.MediaAudio}, valid: true},
+		{name: "latest image", mode: "last", args: "photo", wantLimit: 1, wantMediaFilter: "image", wantMediaTypes: []domain.MediaType{domain.MediaPhoto}, wantLast: true, valid: true},
+		{name: "latest all", mode: "last", wantLimit: 1, wantLast: true, valid: true},
+		{name: "unknown media", mode: "media", args: "spreadsheet", valid: false},
+		{name: "missing sender", mode: "sender", valid: false},
+		{name: "too many latest arguments", mode: "last", args: "video extra", valid: false},
+		{name: "invalid offset", mode: "list", args: "10 -1", valid: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			query, err := parseOwnerListQuery(test.mode, test.args)
+			if !test.valid {
+				if err == nil {
+					t.Fatalf("parseOwnerListQuery(%q, %q) error = nil", test.mode, test.args)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseOwnerListQuery(%q, %q) error = %v", test.mode, test.args, err)
+			}
+			if query.Limit != test.wantLimit || query.LastOnly != test.wantLast ||
+				!equalInt64Pointer(query.SenderID, test.wantSender) || query.SenderUsername != test.wantUsername ||
+				query.MediaFilter != test.wantMediaFilter || !equalMediaTypes(query.MediaTypes, test.wantMediaTypes) {
+				t.Fatalf("owner query = %#v", query)
+			}
+		})
+	}
+}
+
+func TestOwnerListCallbacksApplyFiltersAndPagination(t *testing.T) {
+	tests := []struct {
+		name       string
+		data       string
+		wantLimit  int
+		wantOffset int
+		wantMedia  []domain.MediaType
+	}{
+		{
+			name:      "recording filter",
+			data:      ownerCallbackFilter("recording"),
+			wantLimit: ownerPageSize,
+			wantMedia: []domain.MediaType{domain.MediaVoice, domain.MediaAudio},
+		},
+		{
+			name:       "page preserves state",
+			data:       ownerCallbackPage(encodeOwnerState(ownerListQuery{Limit: 12, Offset: 24, MediaFilter: "video", MediaTypes: []domain.MediaType{domain.MediaVideo}})),
+			wantLimit:  12,
+			wantOffset: 24,
+			wantMedia:  []domain.MediaType{domain.MediaVideo},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var got service.OwnerListOptions
+			useCases := &fakeUseCases{
+				isOwner: func(id int64) bool { return id == 101 },
+				ownerListDetails: func(_ context.Context, ownerID int64, options service.OwnerListOptions) ([]domain.OwnerWhisper, error) {
+					if ownerID != 101 {
+						t.Fatalf("owner callback owner ID = %d", ownerID)
+					}
+					got = options
+					return nil, nil
+				},
+			}
+			tg := &fakeTelegram{}
+			update := telegram.Update{CallbackQuery: &telegram.CallbackQuery{
+				ID: "owner-list-callback", From: telegram.User{ID: 101},
+				Message: &telegram.Message{MessageID: 77, Chat: telegram.Chat{ID: 101, Type: "private"}},
+				Data:    test.data,
+			}}
+			if err := testHandler(useCases, tg).HandleUpdate(context.Background(), update); err != nil {
+				t.Fatalf("HandleUpdate() error = %v", err)
+			}
+			if got.Limit != test.wantLimit || got.Offset != test.wantOffset || !equalMediaTypes(got.MediaTypes, test.wantMedia) {
+				t.Fatalf("owner callback options = %#v", got)
+			}
+			if len(tg.editedMessages) != 1 || len(tg.answers) != 1 || tg.answers[0].ShowAlert {
+				t.Fatalf("callback transport = edits %#v answers %#v", tg.editedMessages, tg.answers)
+			}
+		})
+	}
+}
+
+func TestOwnerCallbacksRejectNonOwners(t *testing.T) {
+	useCases := &fakeUseCases{isOwner: func(int64) bool { return false }}
+	tg := &fakeTelegram{}
+	update := telegram.Update{CallbackQuery: &telegram.CallbackQuery{
+		ID: "unauthorized-owner-callback", From: telegram.User{ID: 999},
+		Message: &telegram.Message{MessageID: 77, Chat: telegram.Chat{ID: 999, Type: "private"}},
+		Data:    ownerCallbackFilter("all"),
+	}}
+	if err := testHandler(useCases, tg).HandleUpdate(context.Background(), update); err != nil {
+		t.Fatalf("HandleUpdate() error = %v", err)
+	}
+	if len(tg.editedMessages) != 0 || len(tg.answers) != 1 || !tg.answers[0].ShowAlert ||
+		!strings.Contains(tg.answers[0].Text, "not available") {
+		t.Fatalf("unauthorized owner callback transport = edits %#v answers %#v", tg.editedMessages, tg.answers)
+	}
+}
+
+func TestOwnerDeleteCallbackRequiresConfirmation(t *testing.T) {
+	whisperID := uuid.New()
+	state := encodeOwnerState(ownerListQuery{Limit: 12, Offset: 24})
+	var deleted uuid.UUID
+	useCases := &fakeUseCases{
+		isOwner: func(id int64) bool { return id == 101 },
+		ownerDelete: func(_ context.Context, ownerID int64, id uuid.UUID) error {
+			if ownerID != 101 {
+				t.Fatalf("owner delete owner ID = %d", ownerID)
+			}
+			deleted = id
+			return nil
+		},
+	}
+	tg := &fakeTelegram{}
+	update := telegram.Update{CallbackQuery: &telegram.CallbackQuery{
+		ID: "owner-delete-confirm", From: telegram.User{ID: 101},
+		Message: &telegram.Message{MessageID: 77, Chat: telegram.Chat{ID: 101, Type: "private"}},
+		Data:    ownerCallbackPrefix + "dc:" + compactOwnerUUID(whisperID) + ":" + state,
+	}}
+	h := testHandler(useCases, tg)
+	if err := h.HandleUpdate(context.Background(), update); err != nil {
+		t.Fatalf("HandleUpdate(delete confirmation) error = %v", err)
+	}
+	if len(tg.editedMessages) != 1 || !strings.Contains(tg.editedMessages[0].Text, "Delete this whisper") || len(tg.answers) != 1 {
+		t.Fatalf("delete confirmation transport = edits %#v answers %#v", tg.editedMessages, tg.answers)
+	}
+	markup := tg.editedMessages[0].ReplyMarkup
+	if markup == nil || len(markup.InlineKeyboard) != 2 || markup.InlineKeyboard[0][0].CallbackData != ownerCallbackPrefix+"dd:"+compactOwnerUUID(whisperID) ||
+		markup.InlineKeyboard[1][0].CallbackData != ownerCallbackItem(whisperID, state) {
+		t.Fatalf("delete confirmation keyboard = %#v", markup)
+	}
+
+	update.CallbackQuery.ID = "owner-delete-confirmed"
+	update.CallbackQuery.Data = markup.InlineKeyboard[0][0].CallbackData
+	tg.editedMessages = nil
+	tg.answers = nil
+	if err := h.HandleUpdate(context.Background(), update); err != nil {
+		t.Fatalf("HandleUpdate(delete) error = %v", err)
+	}
+	if deleted != whisperID || len(tg.editedMessages) != 1 || !strings.Contains(tg.editedMessages[0].Text, "Whisper deleted") ||
+		len(tg.answers) != 1 || !strings.Contains(tg.answers[0].Text, "Whisper deleted") {
+		t.Fatalf("delete transport = deleted %s edits %#v answers %#v", deleted, tg.editedMessages, tg.answers)
+	}
+}

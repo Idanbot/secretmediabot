@@ -88,6 +88,25 @@ func TestOwnerListDetailsForwardsParticipantAndMediaFilters(t *testing.T) {
 	}
 }
 
+func TestOwnerDetailsRejectUnconfiguredActorsBeforeStoreAccess(t *testing.T) {
+	t.Parallel()
+
+	store := newMemoryStore()
+	service, _ := newTestService(t, store, validServiceOptions())
+	whisperID := uuid.New()
+	ctx := context.Background()
+
+	if _, err := service.OwnerListDetails(ctx, 9999, OwnerListOptions{Limit: 5}); !errors.Is(err, ErrOwnerOnly) {
+		t.Fatalf("OwnerListDetails() error = %v, want ErrOwnerOnly", err)
+	}
+	if _, err := service.OwnerMetadata(ctx, 9999, whisperID); !errors.Is(err, ErrOwnerOnly) {
+		t.Fatalf("OwnerMetadata() error = %v, want ErrOwnerOnly", err)
+	}
+	if store.ownerListCalls != 0 || store.ownerGetCalls != 0 || store.ownerReadCalls != 0 {
+		t.Fatal("unauthorized owner metadata request reached repository")
+	}
+}
+
 func TestOwnerMetadataLoadsParticipantLabelsWithoutDecryptingContent(t *testing.T) {
 	t.Parallel()
 
