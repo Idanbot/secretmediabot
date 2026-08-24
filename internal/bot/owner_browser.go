@@ -177,22 +177,13 @@ func (h *Handler) ownerListQuery(
 	query ownerListQuery,
 	callbackMessage *telegram.Message,
 ) error {
-	details, err := h.service.OwnerListDetails(ctx, ownerID, service.OwnerListOptions{
-		Limit:          query.Limit,
-		Offset:         query.Offset,
-		SenderID:       query.SenderID,
-		SenderUsername: query.SenderUsername,
-		MediaTypes:     query.MediaTypes,
-	})
+	details, err := h.service.OwnerListDetails(ctx, ownerID, ownerListOptions(query))
 	if err != nil {
 		return err
 	}
 
 	displayQuery := query
-	if query.SenderID == nil && query.SenderUsername != "" && len(details) > 0 {
-		resolvedID := details[0].Whisper.SenderID
-		query.SenderID = &resolvedID
-	}
+	query = ownerListNavigationQuery(query, details)
 
 	text := renderOwnerList(displayQuery, details)
 	markup := ownerListMarkup(query, details)
@@ -203,6 +194,26 @@ func (h *Handler) ownerListQuery(
 		return nil
 	}
 	return h.sendReply(ctx, message, text, markup)
+}
+
+func ownerListOptions(query ownerListQuery) service.OwnerListOptions {
+	return service.OwnerListOptions{
+		Limit:          query.Limit,
+		Offset:         query.Offset,
+		SenderID:       query.SenderID,
+		SenderUsername: query.SenderUsername,
+		MediaTypes:     query.MediaTypes,
+	}
+}
+
+func ownerListNavigationQuery(query ownerListQuery, details []domain.OwnerWhisper) ownerListQuery {
+	if query.SenderID != nil || query.SenderUsername == "" || len(details) == 0 {
+		return query
+	}
+	resolvedID := details[0].Whisper.SenderID
+	query.SenderID = &resolvedID
+	query.SenderUsername = ""
+	return query
 }
 
 func renderOwnerList(query ownerListQuery, details []domain.OwnerWhisper) string {
@@ -397,24 +408,11 @@ func parseOwnerState(value string) (ownerListQuery, error) {
 	if len(value) < 2 {
 		return ownerListQuery{}, errors.New("invalid owner page state")
 	}
-	query := ownerListQuery{Limit: ownerPageSize}
-	var offsetText string
+	query := ownerListQuery{}
+	var pageParts []string
 	switch value[0] {
 	case 'a':
-		parts := strings.Split(value[1:], ".")
-		if len(parts) == 2 {
-			limit, err := strconv.ParseInt(parts[0], 36, 64)
-			if err != nil || limit < 1 || limit > ownerMaxPageSize {
-				return ownerListQuery{}, errors.New("invalid owner page size")
-			}
-			query.Limit = int(limit)
-			offsetText = parts[1]
-		} else if len(parts) == 1 {
-			// Accept callbacks emitted by older bot instances.
-			offsetText = parts[0]
-		} else {
-			return ownerListQuery{}, errors.New("invalid owner page state")
-		}
+		pageParts = strings.Split(value[1:], ".")
 	case 'm':
 		if len(value) < 3 {
 			return ownerListQuery{}, errors.New("invalid owner media state")
@@ -424,22 +422,10 @@ func parseOwnerState(value string) (ownerListQuery, error) {
 			return ownerListQuery{}, errors.New("invalid owner media state")
 		}
 		query.MediaFilter, query.MediaTypes = filter, mediaTypes
-		parts := strings.Split(value[2:], ".")
-		if len(parts) == 2 {
-			limit, err := strconv.ParseInt(parts[0], 36, 64)
-			if err != nil || limit < 1 || limit > ownerMaxPageSize {
-				return ownerListQuery{}, errors.New("invalid owner page size")
-			}
-			query.Limit = int(limit)
-			offsetText = parts[1]
-		} else if len(parts) == 1 {
-			offsetText = parts[0]
-		} else {
-			return ownerListQuery{}, errors.New("invalid owner media state")
-		}
+		pageParts = strings.Split(value[2:], ".")
 	case 's':
 		parts := strings.Split(value[1:], ".")
-		if len(parts) != 2 && len(parts) != 3 {
+		if len(parts) < 2 {
 			return ownerListQuery{}, errors.New("invalid owner sender state")
 		}
 		senderID, err := strconv.ParseInt(parts[0], 36, 64)
@@ -447,25 +433,38 @@ func parseOwnerState(value string) (ownerListQuery, error) {
 			return ownerListQuery{}, errors.New("invalid owner sender state")
 		}
 		query.SenderID = &senderID
-		if len(parts) == 3 {
-			limit, err := strconv.ParseInt(parts[1], 36, 64)
-			if err != nil || limit < 1 || limit > ownerMaxPageSize {
-				return ownerListQuery{}, errors.New("invalid owner page size")
-			}
-			query.Limit = int(limit)
-			offsetText = parts[2]
-		} else {
-			offsetText = parts[1]
-		}
+		pageParts = parts[1:]
 	default:
 		return ownerListQuery{}, errors.New("unknown owner page state")
 	}
+	limit, offset, err := parseOwnerPageState(pageParts)
+	if err != nil {
+		return ownerListQuery{}, err
+	}
+	query.Limit = limit
+	query.Offset = offset
+	return query, nil
+}
+
+func parseOwnerPageState(parts []string) (int, int, error) {
+	if len(parts) < 1 || len(parts) > 2 {
+		return 0, 0, errors.New("invalid owner page state")
+	}
+	limit := ownerPageSize
+	offsetText := parts[0]
+	if len(parts) == 2 {
+		parsedLimit, err := strconv.ParseInt(parts[0], 36, 64)
+		if err != nil || parsedLimit < 1 || parsedLimit > ownerMaxPageSize {
+			return 0, 0, errors.New("invalid owner page size")
+		}
+		limit = int(parsedLimit)
+		offsetText = parts[1]
+	}
 	offset, err := strconv.ParseInt(offsetText, 36, 64)
 	if err != nil || offset < 0 || offset > int64(^uint(0)>>1) {
-		return ownerListQuery{}, errors.New("invalid owner page offset")
+		return 0, 0, errors.New("invalid owner page offset")
 	}
-	query.Offset = int(offset)
-	return query, nil
+	return limit, int(offset), nil
 }
 
 func ownerMediaFilterCode(filter string) string {
@@ -619,18 +618,12 @@ func (h *Handler) handleOwnerCallback(ctx context.Context, callback telegram.Cal
 }
 
 func (h *Handler) ownerListCallback(ctx context.Context, callback telegram.CallbackQuery, message telegram.Message, query ownerListQuery) error {
-	details, err := h.service.OwnerListDetails(ctx, callback.From.ID, service.OwnerListOptions{
-		Limit: query.Limit, Offset: query.Offset, SenderID: query.SenderID,
-		SenderUsername: query.SenderUsername, MediaTypes: query.MediaTypes,
-	})
+	details, err := h.service.OwnerListDetails(ctx, callback.From.ID, ownerListOptions(query))
 	if err != nil {
 		return h.ownerCallbackError(ctx, callback.ID, err)
 	}
 	displayQuery := query
-	if query.SenderID == nil && query.SenderUsername != "" && len(details) > 0 {
-		resolvedID := details[0].Whisper.SenderID
-		query.SenderID = &resolvedID
-	}
+	query = ownerListNavigationQuery(query, details)
 	if err := h.editOwnerMessage(ctx, message, renderOwnerList(displayQuery, details), ownerListMarkup(query, details)); err != nil {
 		return err
 	}
@@ -643,7 +636,7 @@ func (h *Handler) ownerDetailCallback(ctx context.Context, callback telegram.Cal
 		return h.ownerCallbackError(ctx, callback.ID, err)
 	}
 	if _, err := parseOwnerState(state); err != nil {
-		state = "a0"
+		state = encodeOwnerState(ownerListQuery{Limit: ownerPageSize})
 	}
 	if err := h.editOwnerMessage(ctx, message, renderOwnerDetail(detail), ownerDetailMarkup(id, state)); err != nil {
 		return err
