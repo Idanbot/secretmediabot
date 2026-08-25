@@ -453,15 +453,15 @@ func parseOwnerPageState(parts []string) (int, int, error) {
 	limit := ownerPageSize
 	offsetText := parts[0]
 	if len(parts) == 2 {
-		parsedLimit, err := strconv.ParseInt(parts[0], 36, 64)
+		parsedLimit, err := strconv.ParseInt(parts[0], 36, 0)
 		if err != nil || parsedLimit < 1 || parsedLimit > ownerMaxPageSize {
 			return 0, 0, errors.New("invalid owner page size")
 		}
 		limit = int(parsedLimit)
 		offsetText = parts[1]
 	}
-	offset, err := strconv.ParseInt(offsetText, 36, 64)
-	if err != nil || offset < 0 || offset > int64(^uint(0)>>1) {
+	offset, err := strconv.ParseInt(offsetText, 36, 0)
+	if err != nil || offset < 0 {
 		return 0, 0, errors.New("invalid owner page offset")
 	}
 	return limit, int(offset), nil

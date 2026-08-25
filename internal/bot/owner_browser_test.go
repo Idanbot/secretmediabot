@@ -54,6 +54,7 @@ func TestOwnerStateParsesCurrentAndLegacyCallbacks(t *testing.T) {
 		{name: "missing payload", state: "a", valid: false},
 		{name: "zero page size", state: "a0.0", valid: false},
 		{name: "negative offset", state: "a5.-1", valid: false},
+		{name: "oversized offset", state: "a5.zzzzzzzzzzzzzzzz", valid: false},
 		{name: "too many page parts", state: "a5.0.extra", valid: false},
 		{name: "unknown media", state: "mx5.0", valid: false},
 		{name: "zero sender", state: "s0.5.0", valid: false},
