@@ -164,7 +164,12 @@ func healthcheck() error {
 	default:
 		return fmt.Errorf("HTTP_ADDR %q is not host:port", addr)
 	}
-	client := http.Client{Timeout: 4 * time.Second}
+	client := http.Client{
+		Timeout: 4 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	response, err := client.Get("http://" + net.JoinHostPort(host, strings.TrimPrefix(addr, ":")) + "/healthz")
 	if err != nil {
 		return err
