@@ -19,6 +19,14 @@ type RecordedCall struct {
 	Body   []byte
 }
 
+type apiReject struct {
+	method      string
+	chatID      int64
+	code        int
+	description string
+	used        bool
+}
+
 type TelegramMockServer struct {
 	Server   *httptest.Server
 	BaseURL  string
@@ -27,6 +35,7 @@ type TelegramMockServer struct {
 	mu        sync.Mutex
 	messageID atomic.Int64
 	calls     []RecordedCall
+	rejects   []apiReject
 
 	SentMessages          []telegram.SendMessageRequest
 	AnsweredCallbacks     []telegram.AnswerCallbackQueryRequest
@@ -108,6 +117,10 @@ func NewTelegramMockServer(botUsername string) *TelegramMockServer {
 		case "sendMessage":
 			var req telegram.SendMessageRequest
 			_ = json.Unmarshal(body, &req)
+			if reject := mock.takeReject("sendMessage", req.ChatID); reject != nil {
+				writeAPIError(w, reject)
+				return
+			}
 			msgID := mock.messageID.Add(1)
 
 			mock.mu.Lock()
@@ -128,6 +141,10 @@ func NewTelegramMockServer(botUsername string) *TelegramMockServer {
 			})
 
 		case "sendPhoto", "sendVoice", "sendVideo", "sendAudio", "sendDocument":
+			if reject := mock.takeReject(method, 0); reject != nil {
+				writeAPIError(w, reject)
+				return
+			}
 			msgID := mock.messageID.Add(1)
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"ok": true,
@@ -140,7 +157,6 @@ func NewTelegramMockServer(botUsername string) *TelegramMockServer {
 					},
 				},
 			})
-
 		case "answerCallbackQuery":
 			var req telegram.AnswerCallbackQueryRequest
 			_ = json.Unmarshal(body, &req)
@@ -225,4 +241,44 @@ func (m *TelegramMockServer) RecordedCalls() []RecordedCall {
 	copied := make([]RecordedCall, len(m.calls))
 	copy(copied, m.calls)
 	return copied
+}
+
+// RejectChat fails the next matching Bot API call. chatID 0 matches any chat.
+func (m *TelegramMockServer) RejectChat(method string, chatID int64, code int, description string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rejects = append(m.rejects, apiReject{
+		method: method, chatID: chatID, code: code, description: description,
+	})
+}
+
+// RejectOnce fails the next call to method, regardless of chat.
+func (m *TelegramMockServer) RejectOnce(method string, code int, description string) {
+	m.RejectChat(method, 0, code, description)
+}
+
+func (m *TelegramMockServer) takeReject(method string, chatID int64) *apiReject {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.rejects {
+		r := &m.rejects[i]
+		if r.used || r.method != method {
+			continue
+		}
+		if r.chatID != 0 && r.chatID != chatID {
+			continue
+		}
+		r.used = true
+		copyReject := *r
+		return &copyReject
+	}
+	return nil
+}
+
+func writeAPIError(w http.ResponseWriter, reject *apiReject) {
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":          false,
+		"error_code":  reject.code,
+		"description": reject.description,
+	})
 }
