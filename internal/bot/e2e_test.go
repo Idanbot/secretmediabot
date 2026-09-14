@@ -76,9 +76,11 @@ func newE2EStore() *e2eStore {
 type e2eEnv struct {
 	t       *testing.T
 	mock    *testutil.TelegramMockServer
+	client  *telegram.Client
 	store   *e2eStore
 	svc     *service.Service
 	handler *bot.Handler
+	opts    service.Options
 	ctx     context.Context
 	nextID  int64
 
@@ -144,7 +146,7 @@ func newE2E(t *testing.T, tweak ...func(*service.Options)) *e2eEnv {
 	}
 
 	return &e2eEnv{
-		t: t, mock: mock, store: store, svc: svc, handler: handler,
+		t: t, mock: mock, client: client, store: store, svc: svc, handler: handler, opts: opts,
 		ctx:       context.Background(),
 		sender:    telegram.User{ID: 101, FirstName: "Alice", Username: "alice_user"},
 		recipient: telegram.User{ID: 202, FirstName: "Bob", Username: "bobby_user"},
@@ -290,6 +292,28 @@ func (e *e2eEnv) openedWhisper() domain.Whisper {
 	}
 	e.t.Fatal("expected a whisper in the store")
 	return domain.Whisper{}
+}
+
+func (e *e2eEnv) replaceService(keyring *secretcrypto.Keyring) {
+	e.t.Helper()
+	svc, err := service.New(e.store, keyring, e.opts)
+	if err != nil {
+		e.t.Fatalf("service.New: %v", err)
+	}
+	handler, err := bot.New(bot.Config{
+		Service:              svc,
+		Telegram:             e.client,
+		BotUsername:          "secretmediabot",
+		MaxMediaBytes:        20 * 1024 * 1024,
+		MediaDownloadTimeout: 10 * time.Second,
+		RequestTimeout:       5 * time.Second,
+		Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		e.t.Fatalf("bot.New: %v", err)
+	}
+	e.svc = svc
+	e.handler = handler
 }
 
 func (s *e2eStore) ObserveMembership(ctx context.Context, params repository.ObserveMembershipParams) error {
@@ -619,6 +643,21 @@ func (s *e2eStore) FetchWhisperMedia(ctx context.Context, id uuid.UUID) (reposit
 }
 
 func (s *e2eStore) CreateGuestRequest(ctx context.Context, params repository.GuestCreateParams) (repository.GuestRequest, error) {
+	if params.MaxActivePerSender > 0 {
+		active := 0
+		for _, existing := range s.guests {
+			if existing.SenderID != params.Request.SenderID {
+				continue
+			}
+			switch existing.State {
+			case repository.GuestStateAwaitingSecret, repository.GuestStateIngestingSecret, repository.GuestStateReady:
+				active++
+			}
+		}
+		if active+1 > params.MaxActivePerSender {
+			return repository.GuestRequest{}, repository.ErrGuestActiveLimit
+		}
+	}
 	req := params.Request
 	s.guests[req.ID] = req
 	s.guestTokens[string(req.TokenHash)] = req.ID
@@ -1034,6 +1073,26 @@ func TestE2EMediaWhisperTypes(t *testing.T) {
 			method: "sendVoice",
 		},
 		{
+			name: "video",
+			attach: func(m *telegram.Message) {
+				m.Video = &telegram.Video{
+					FileID: "video_secret", FileUniqueID: "u_video",
+					Width: 1280, Height: 720, Duration: 8, MIMEType: "video/mp4", FileSize: 30,
+				}
+			},
+			method: "sendVideo",
+		},
+		{
+			name: "audio",
+			attach: func(m *telegram.Message) {
+				m.Audio = &telegram.Audio{
+					FileID: "audio_secret", FileUniqueID: "u_audio",
+					Duration: 12, MIMEType: "audio/mpeg", FileSize: 30,
+				}
+			},
+			method: "sendAudio",
+		},
+		{
 			name: "document",
 			attach: func(m *telegram.Message) {
 				m.Document = &telegram.Document{
@@ -1335,5 +1394,169 @@ func TestE2EOwnerMenuAndEphemeralToggle(t *testing.T) {
 	}})
 	if env.svc.GetEphemeralDeleteAfter() != 0 {
 		t.Fatalf("expected EphemeralDeleteAfter to be 0 (disabled), got %s", env.svc.GetEphemeralDeleteAfter())
+	}
+}
+
+func TestE2ERejectsSelfTargetedWhisper(t *testing.T) {
+	t.Parallel()
+	env := newE2E(t)
+	env.observeGroup(env.sender, env.recipient)
+	env.handle(telegram.Update{Message: &telegram.Message{
+		MessageID: 12, Chat: env.group, From: &env.sender, Text: "/whisper @alice_user",
+	}})
+	env.requireSent(env.group.ID, "Choose someone other than yourself")
+}
+
+func TestE2ERejectsUnobservedUsername(t *testing.T) {
+	t.Parallel()
+	env := newE2E(t)
+	env.observeGroup(env.sender)
+	env.handle(telegram.Update{Message: &telegram.Message{
+		MessageID: 12, Chat: env.group, From: &env.sender, Text: "/whisper @stranger_user",
+	}})
+	env.requireSent(env.group.ID, "I have not observed that user in this group")
+}
+
+func TestE2ERejectsAlbumMedia(t *testing.T) {
+	t.Parallel()
+	env := newE2E(t)
+	env.observeGroup(env.sender, env.recipient)
+	env.handle(telegram.Update{Message: &telegram.Message{
+		MessageID: 12, Chat: env.group, From: &env.sender, Text: "/whisper @bobby_user",
+	}})
+	env.handle(telegram.Update{Message: &telegram.Message{
+		MessageID: 20, Chat: env.private(env.sender), From: &env.sender,
+		MediaGroupID: "album-1",
+		Photo: []telegram.PhotoSize{{
+			FileID: "album_photo", FileUniqueID: "u_album", Width: 800, Height: 600, FileSize: 30,
+		}},
+	}})
+	env.requireSent(env.sender.ID, "Albums are not supported")
+}
+
+func TestE2ESecondDraftIsRefused(t *testing.T) {
+	t.Parallel()
+	env := newE2E(t, func(o *service.Options) { o.MaxActiveDraftsPerUser = 1 })
+	env.observeGroup(env.sender, env.recipient, env.intruder)
+	env.handle(telegram.Update{Message: &telegram.Message{
+		MessageID: 12, Chat: env.group, From: &env.sender, Text: "/whisper @bobby_user",
+	}})
+	env.handle(telegram.Update{Message: &telegram.Message{
+		MessageID: 13, Chat: env.group, From: &env.sender, Text: "/whisper @eve_user",
+	}})
+	env.requireSent(env.group.ID, "Finish or /cancel your active draft")
+}
+
+func TestE2EDraftTakesPrecedenceOverGuestIngest(t *testing.T) {
+	t.Parallel()
+	env := newE2E(t)
+	env.observeGroup(env.sender, env.recipient)
+
+	env.handle(telegram.Update{InlineQuery: &telegram.InlineQuery{
+		ID: "inline_guest_pending", From: env.sender, Query: "@bobby_user",
+	}})
+	env.handle(telegram.Update{Message: &telegram.Message{
+		MessageID: 12, Chat: env.group, From: &env.sender, Text: "/whisper @bobby_user",
+	}})
+
+	const secret = "draft-wins-over-guest"
+	env.handle(telegram.Update{Message: &telegram.Message{
+		MessageID: 20, Chat: env.private(env.sender), From: &env.sender, Text: secret,
+	}})
+	env.openCallback("cb_draft_wins", env.recipient, env.envelopeCallback())
+	env.requireEphemeral(env.recipient.ID, secret)
+}
+
+func TestE2EKeyRotationStillDecryptsExistingWhisper(t *testing.T) {
+	t.Parallel()
+	env := newE2E(t)
+	env.observeGroup(env.sender, env.recipient)
+	env.handle(telegram.Update{Message: &telegram.Message{
+		MessageID: 12, Chat: env.group, From: &env.sender, Text: "/whisper @bobby_user",
+	}})
+	const secret = "rotated-key secret"
+	env.handle(telegram.Update{Message: &telegram.Message{
+		MessageID: 20, Chat: env.private(env.sender), From: &env.sender, Text: secret,
+	}})
+	callback := env.envelopeCallback()
+
+	v1 := make([]byte, 32)
+	v2 := make([]byte, 32)
+	for i := range v1 {
+		v1[i] = byte(i*7 + 3)
+		v2[i] = byte(i*11 + 5)
+	}
+	rotated, err := secretcrypto.NewKeyring("v2", map[string][]byte{"v1": v1, "v2": v2})
+	if err != nil {
+		t.Fatalf("NewKeyring: %v", err)
+	}
+	env.replaceService(rotated)
+
+	env.openCallback("cb_rotated", env.recipient, callback)
+	env.requireEphemeral(env.recipient.ID, secret)
+}
+
+func TestE2EGuestTwoStepTextComposer(t *testing.T) {
+	t.Parallel()
+	env := newE2E(t)
+
+	env.handle(telegram.Update{InlineQuery: &telegram.InlineQuery{
+		ID: "inline_text_draft", From: env.sender, Query: "@bobby_user",
+	}})
+	startParam := env.latestStartParam()
+	env.privateStart(env.sender, startParam)
+	env.handle(telegram.Update{Message: &telegram.Message{
+		MessageID: 21, Chat: env.private(env.sender), From: &env.sender, Text: "guest composer text",
+	}})
+	env.requireSent(env.sender.ID, "Secret stored privately")
+
+	env.privateStart(env.recipient, startParam)
+	env.requireSent(env.recipient.ID, "guest composer text")
+}
+
+func TestE2EGuestCancelDiscardsPendingRequest(t *testing.T) {
+	t.Parallel()
+	env := newE2E(t)
+
+	env.handle(telegram.Update{InlineQuery: &telegram.InlineQuery{
+		ID: "inline_cancel", From: env.sender, Query: "@bobby_user",
+	}})
+	startParam := env.latestStartParam()
+	env.handle(telegram.Update{Message: &telegram.Message{
+		MessageID: 22, Chat: env.private(env.sender), From: &env.sender, Text: "/cancel",
+	}})
+	env.requireSent(env.sender.ID, "Locked secret cancelled")
+
+	env.privateStart(env.recipient, startParam)
+	env.requireSent(env.recipient.ID, "invalid or expired")
+}
+
+func TestE2EInlineRejectsSelfTarget(t *testing.T) {
+	t.Parallel()
+	env := newE2E(t)
+	env.handle(telegram.Update{InlineQuery: &telegram.InlineQuery{
+		ID: "inline_self", From: env.sender, Query: "@alice_user secret-to-self",
+	}})
+	if len(env.mock.AnsweredInlineQueries) == 0 {
+		t.Fatal("expected inline notice")
+	}
+	title := env.mock.AnsweredInlineQueries[0].Results[0].Title
+	if !strings.Contains(title, "Cannot send secret to yourself") {
+		t.Fatalf("inline title = %q, want self-target refusal", title)
+	}
+}
+
+func TestE2EGuestActiveLimitBlocksNewRequest(t *testing.T) {
+	t.Parallel()
+	env := newE2E(t, func(o *service.Options) { o.MaxActiveGuestRequestsPerUser = 1 })
+	env.handle(telegram.Update{InlineQuery: &telegram.InlineQuery{
+		ID: "inline_limit_1", From: env.sender, Query: "@bobby_user first secret",
+	}})
+	env.handle(telegram.Update{InlineQuery: &telegram.InlineQuery{
+		ID: "inline_limit_2", From: env.sender, Query: "@eve_user second secret",
+	}})
+	ans := env.mock.AnsweredInlineQueries[len(env.mock.AnsweredInlineQueries)-1]
+	if len(ans.Results) == 0 || !strings.Contains(ans.Results[0].Title, "Active secret limit") {
+		t.Fatalf("expected active-limit inline notice, got %#v", ans)
 	}
 }
