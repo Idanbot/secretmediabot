@@ -7,7 +7,7 @@ toolchain go1.26.6
 require (
 	github.com/google/uuid v1.6.0
 	github.com/pressly/goose/v3 v3.29.0
-	gorm.io/driver/postgres v1.6.2
+  gorm.io/driver/postgres v1.6.3
 	gorm.io/gorm v1.31.2
 )
 
